@@ -1,0 +1,955 @@
+import traceback
+from pathlib import Path
+from typing import Optional
+
+import qt
+import slicer
+import ctk
+import vtk
+from slicer.parameterNodeWrapper import parameterNodeWrapper
+import numpy as np
+
+from .InstallLogic import InstallLogic, InstallLogicProtocol
+from .Parameter import Parameter
+from .Logic import Logic, LogicProtocol, SkeletonizationLogic
+from .Signal import Signal
+
+import time
+
+@parameterNodeWrapper
+class WidgetParameterNode:
+    inputVolume: slicer.vtkMRMLScalarVolumeNode
+    parameter: Parameter
+
+
+class Widget(qt.QWidget):
+    """
+    nnUNet widget containing an install and run settings collapsible areas.
+    Allows to run nnUNet model and displays results in the UI.
+    Saves the used settings to QSettings for reloading.
+    """
+
+    def __init__(
+            self,
+            logic: Optional[LogicProtocol] = None,
+            skeletonizationLogic: Optional[LogicProtocol] = None,
+            parent=None
+    ):
+        super().__init__(parent)
+        self.logic = logic or Logic()
+        self.skelLogic = skeletonizationLogic or SkeletonizationLogic()
+
+        # Instantiate widget UI
+        layout = qt.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # ─────────────────── Inputs collapsible ──────────────────────
+        # Inputs form layout directly in the main layout
+        inputsFormLayout = qt.QFormLayout()
+        layout.addLayout(inputsFormLayout)
+        inputsFormLayout.setContentsMargins(10,10,10,10)
+
+        # Input Type combo
+        self.unsegmentedRadio = qt.QRadioButton("Unsegmented volume")
+        self.segmentationRadio = qt.QRadioButton("Segmentation")
+        self.unsegmentedRadio.setChecked(True)
+
+        self.inputTypeGroup = qt.QButtonGroup()
+        self.inputTypeGroup.addButton(self.unsegmentedRadio)
+        self.inputTypeGroup.addButton(self.segmentationRadio)
+        
+        # Layout to hold them
+        inputTypeLayout = qt.QHBoxLayout()
+        inputTypeLayout.addWidget(self.unsegmentedRadio)
+        inputTypeLayout.addWidget(self.segmentationRadio)
+
+        # Add to form
+        inputsFormLayout.addRow("Input type:", inputTypeLayout)
+
+        # ---- Input Volume selector
+        self.inputLabel = qt.QLabel("Input Volume:")
+        self.inputLabel.setFixedWidth(135)
+        self.inputSelector = slicer.qMRMLNodeComboBox()
+        self.inputSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.inputSelector.showChildNodeTypes = False
+        self.inputSelector.addEnabled = False
+        self.inputSelector.removeEnabled = False
+        
+        self.inputSelector.setMRMLScene(slicer.mrmlScene)
+
+        inputsFormLayout.addRow(self.inputLabel, self.inputSelector)
+
+        # --- Segments Table
+        self.segmentsTableWidget = qt.QTableWidget() 
+        self.segmentsTableWidget.setColumnCount(3)
+        self.segmentsTableWidget.setEditTriggers(qt.QTableWidget.NoEditTriggers)
+        self.segmentsTableWidget.setAlternatingRowColors(True)
+        self.segmentsTableWidget.setMinimumHeight(150)
+        self.segmentsTableWidget.setSelectionBehavior(qt.QTableWidget.SelectRows)
+        self.segmentsTableWidget.verticalHeader().setDefaultSectionSize(24)
+
+        # add button in header to hide/show all segments
+        self._allSegmentVisibleState = True
+        self._segVisHeaderButton = qt.QPushButton(self.segmentsTableWidget.horizontalHeader())
+        self._segVisHeaderButton.setIcon(qt.QIcon(":/Icons/Small/SlicerVisible.png"))
+        self._segVisHeaderButton.setFlat(True)
+        self._segVisHeaderButton.setFixedSize(20, 20)
+        self._segVisHeaderButton.setIconSize(qt.QSize(16, 16))
+        self._segVisHeaderButton.setVisible(False)
+        self.segmentsTableWidget.setColumnWidth(0, 24)
+        self._segVisHeaderButton.connect("clicked()", self._onToggleAllSegmentVisibility)
+
+        # segment colour
+        self.segmentsTableWidget.setHorizontalHeaderLabels(["", "", "Segment"])
+        self.segmentsTableWidget.setColumnWidth(1, 24)
+        # self.segmentsTableWidget.connect("cellClicked(int,int)", self._onSegmentsTableCellClicked) # open QColorDialog
+
+        # column resizing -- fix segment visibility and colour, stretch Segment
+        self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.Fixed)
+        self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.Fixed)
+        self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.Stretch)
+
+        # Centreline -- only show after skeletonization
+        self._allCenterlineVisibleState = True
+        self._clVisHeaderButton = qt.QPushButton(self.segmentsTableWidget.horizontalHeader())
+        self._clVisHeaderButton.setIcon(qt.QIcon(":/Icons/Small/SlicerVisible.png"))
+        self._clVisHeaderButton.setFlat(True)
+        self._clVisHeaderButton.setFixedSize(20, 20)
+        self._clVisHeaderButton.setIconSize(qt.QSize(16, 16))
+        self._clVisHeaderButton.setVisible(False)
+        self._clVisHeaderButton.connect("clicked()", self._onToggleAllCenterlineVisibility)
+
+        self.segmentsTableWidget.horizontalHeader().connect(
+            "sectionResized(int,int,int)", self._repositionCLHeaderButton)
+        self.segmentsTableWidget.horizontalHeader().connect(
+            "sectionMoved(int,int,int)", self._repositionCLHeaderButton)
+
+        # only turn on Segment table if input type is Segmentation
+        self.segmentsTableWidget.setVisible(False)
+        inputsFormLayout.addItem(qt.QSpacerItem(0, 6))
+        inputsFormLayout.addRow(self.segmentsTableWidget)
+
+
+        # ─────────────────── Segmentation collapsible ────────────────────────
+        self.segCollapsibleButton = ctk.ctkCollapsibleButton()
+        self.segCollapsibleButton.setStyleSheet("""
+            ctkCollapsibleButton {
+                background-color: #d9dbd9;  /* background color */
+                border: 1px solid gray;
+                border-radius: 4px;
+            }
+        """)
+        self.segCollapsibleButton.text = "Segmentation"
+        self.segCollapsibleButton.collapsed = True
+        layout.addWidget(self.segCollapsibleButton)
+
+        segmentationFormLayout = qt.QFormLayout(self.segCollapsibleButton)
+        segmentationFormLayout.setContentsMargins(12,12,12,12)
+
+        # nnUNetv2 Configuration
+        self.nnUNetOptionsGroupBox = qt.QGroupBox()
+        self.nnUNetOptionsGroupBox.setStyleSheet("QGroupBox { margin-left: 18px; }")
+        self.nnUNetOptionsLayout = qt.QFormLayout(self.nnUNetOptionsGroupBox)
+        self.modelPathLabel = qt.QLabel("Model path:")
+        self.modelPathEdit = ctk.ctkPathLineEdit()
+        self.modelPathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Models/Dataset001_TopBrain")
+        self.modelCheckpointLabel = qt.QLabel("Model checkpoint:")
+        self.modelCheckpointEdit = qt.QLineEdit()
+        self.modelCheckpointEdit.setText("checkpoint_best.pth")
+
+        # Segmentation method label (own row)
+        segmentationFormLayout.addRow(qt.QLabel("Method:"))
+        self.segMethods = ["nnUNetv2", "VMTK Vesselness Filter"]
+        self.segMethodGroup = qt.QButtonGroup()
+        segMethodLayout = qt.QVBoxLayout()
+        segMethodLayout.setAlignment(qt.Qt.AlignLeft)
+        segMethodLayout.setContentsMargins(10,0,0,0)
+
+        for method in self.segMethods:
+            radio = qt.QRadioButton(method)
+            self.segMethodGroup.addButton(radio)
+            segMethodLayout.addWidget(radio)
+
+            if method == "nnUNetv2":
+                self.nnUNetOptionsLayout.addRow(self.modelPathLabel, self.modelPathEdit)
+                self.nnUNetOptionsLayout.addRow(self.modelCheckpointLabel, self.modelCheckpointEdit)
+                segMethodLayout.addWidget(self.nnUNetOptionsGroupBox)
+
+        
+        self.segMethodGroup.buttons()[0].setChecked(True)
+        segmentationFormLayout.addRow(segMethodLayout)
+
+        segmentationFormLayout.addItem(qt.QSpacerItem(0, 5))
+        self.runSegPushButton = qt.QPushButton("▶︎ Run Segmentation")
+        segmentationFormLayout.addRow("", self.runSegPushButton)
+
+
+        # ─────────────────── Skeletonization collapsible ───────────────────────
+        self.skelCollapsibleButton = ctk.ctkCollapsibleButton()
+        self.skelCollapsibleButton.setStyleSheet("""
+            ctkCollapsibleButton {
+                background-color: #d9dbd9;  /* background color */
+                border: 1px solid gray;
+                border-radius: 4px;
+            }
+        """)
+
+        self.skelCollapsibleButton.text = "Skeletonization & Feature Extraction"
+        self.skelCollapsibleButton.collapsed = True
+        layout.addWidget(self.skelCollapsibleButton)
+        skeletonizationFormLayout = qt.QFormLayout(self.skelCollapsibleButton)
+        skeletonizationFormLayout.setContentsMargins(12,12,12,12)
+
+        # Skeletonization method radio buttons
+        skeletonizationFormLayout.addRow(qt.QLabel("Method:"))
+        self.skelMethods = ["Medial axis thinning", "VMTK Extract Centerline"]
+        self.skelMethodGroup = qt.QButtonGroup()
+        skelMethodLayout = qt.QVBoxLayout()
+        skelMethodLayout.setAlignment(qt.Qt.AlignLeft)
+        skelMethodLayout.setContentsMargins(10,0,0,0)
+
+        for method in self.skelMethods:
+            radio = qt.QRadioButton(method)
+            self.skelMethodGroup.addButton(radio)
+            skelMethodLayout.addWidget(radio)
+
+        self.skelMethodGroup.buttons()[0].setChecked(True)
+        skeletonizationFormLayout.addRow(skelMethodLayout)
+
+        skeletonizationFormLayout.addItem(qt.QSpacerItem(0, 5))
+        self.runSkelPushButton = qt.QPushButton("▶︎ Run Skeletonization")
+        skeletonizationFormLayout.addRow("", self.runSkelPushButton)
+
+        layout.addStretch(1)
+
+
+
+        # # ── Feature Extraction collapsible ─────────────────────────────────────────
+        # self.featExCollapsibleButton = ctk.ctkCollapsibleButton()
+        # self.featExCollapsibleButton.setStyleSheet("""
+        #     ctkCollapsibleButton {
+        #         background-color: #d9dbd9;  /* background color */
+        #         border: 1px solid gray;
+        #         border-radius: 4px;
+        #     }
+        # """)
+        # self.featExCollapsibleButton.text = "Feature Extraction"
+        # self.featExCollapsibleButton.collapsed = True
+        # layout.addWidget(self.featExCollapsibleButton)
+
+        # # Form layout inside collapsible
+        # featExFormLayout = qt.QFormLayout(self.featExCollapsibleButton)
+        # featExFormLayout.setContentsMargins(12,12,12,12)
+
+        # # Section label
+        # featExFormLayout.addRow(qt.QLabel("Morphological:"))
+
+        # # Grid layout for checkboxes (2 columns × 2 rows)
+        # featOptionsGrid = qt.QGridLayout()
+        # featOptionsGrid.setContentsMargins(10,0,0,0)
+        # # Create checkboxes
+        # self.diameterChk = qt.QCheckBox("Diameter")
+        # self.tortuosityChk = qt.QCheckBox("Tortuosity")
+        # self.lengthChk = qt.QCheckBox("Length")
+        # self.diameterChk.setChecked(True)
+        # self.tortuosityChk.setChecked(True)
+        # self.lengthChk.setChecked(True)
+
+        # # Add checkboxes to the grid
+        # featOptionsGrid.addWidget(self.diameterChk, 0, 0)
+        # featOptionsGrid.addWidget(self.tortuosityChk, 0, 1)
+        # featOptionsGrid.addWidget(self.lengthChk, 1, 0)
+
+        # # Align left
+        # featOptionsGrid.setAlignment(qt.Qt.AlignLeft)
+        # featOptionsGrid.setHorizontalSpacing(10)
+        # featOptionsGrid.setVerticalSpacing(4)
+
+        # # Add the grid to the form layout
+        # featExFormLayout.addRow(featOptionsGrid)
+        # featExFormLayout.addItem(qt.QSpacerItem(0, 5))
+
+        # # Run button
+        # self.runFeatExPushButton = qt.QPushButton("▶︎ Run Feature Extraction")
+        # featExFormLayout.addRow("", self.runFeatExPushButton)
+        # layout.addStretch(1)
+
+
+        # ── Connections ─────────────────────────────────────────────────────────
+        # self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
+        # self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+
+        self.unsegmentedRadio.connect("toggled(bool)", self.onInputTypeChanged)
+        self.segmentationRadio.connect("toggled(bool)", self.onInputTypeChanged)
+
+        self.inputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onInputNodeChanged)
+
+        self.segMethodGroup.connect("buttonClicked(QAbstractButton*)", self.onSegMethodChanged)
+        self.skelMethodGroup.connect("buttonClicked(QAbstractButton*)", self.onSkelMethodChanged)
+
+        self.runSegPushButton.connect("clicked(bool)", self.onApplySegButton)
+        self.runSkelPushButton.connect("clicked(bool)", self.onApplySkelButton)
+
+        # self.runFeatExPushButton.connect("clicked(bool)", self.onApplyFeatExButton)
+
+        # Make sure parameter node is initialized (needed for module reload)
+        # self.initializeParameterNode()
+
+        # Logic connections
+        self.logic.progressInfo.connect(self.onProgressInfo)
+
+
+        # Create parameter node and connect GUI
+        self._parameterNode = self._createParameterNode()
+        self._parameterNode.parameter = Parameter.fromSettings()
+        self._parameterNode.connectParametersToGui(
+            {
+
+                "parameter.modelPath": self.modelPathEdit,
+                "parameter.modelCheckpointName": self.modelCheckpointEdit,
+                # "parameter.device": self.ui.deviceComboBox,
+                # "parameter.stepSize": self.ui.stepSizeSlider,
+                # "parameter.checkPointName": self.ui.checkPointNameLineEdit,
+                # "parameter.folds": self.ui.foldsLineEdit,
+                # "parameter.nProcessPreprocessing": self.ui.nProcessPreprocessingSpinBox,
+                # "parameter.nProcessSegmentationExport": self.ui.nProcessSegmentationExportSpinBox,
+                # "parameter.disableTta": self.ui.disableTtaCheckBox
+            }
+        )
+        
+        self._currentDisplayNode = None
+        self._pickingSegmentationNode = None
+        self._pickingInteractor = None
+        self._pickingObserverTag = None
+        self._tooltipLabel = None
+        self._ijkToRas = None
+
+    @staticmethod
+    def _createParameterNode() -> WidgetParameterNode:
+        moduleName = "NeuroCTA"
+        parameterNode = slicer.mrmlScene.GetSingletonNode(moduleName, "vtkMRMLScriptedModuleNode")
+        if not parameterNode:
+            parameterNode = slicer.mrmlScene.CreateNodeByClass("vtkMRMLScriptedModuleNode")
+            parameterNode.SetName(slicer.mrmlScene.GenerateUniqueName(moduleName))
+
+        parameterNode.SetAttribute("ModuleName", moduleName)
+        return WidgetParameterNode(parameterNode)
+
+    def onInputTypeChanged(self) -> None:
+        """Update the input selector label based on the selected input type."""
+
+        if self.unsegmentedRadio.isChecked():  # Unsegmented Volume
+            self._stopSegmentPicking()
+            self.inputSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+            self.inputLabel.setText("Input volume:")
+            self._setSectionState(self.segCollapsibleButton,   enabled=True,  collapsed=False)
+            self._setSectionState(self.skelCollapsibleButton,  enabled=False, collapsed=True)
+            # self._setSectionState(self.featExCollapsibleButton,enabled=False, collapsed=True)
+
+        else:  # Segmentation
+            self.inputSelector.nodeTypes = ["vtkMRMLSegmentationNode"]
+            self.inputLabel.setText("Input segmentation:")
+            self._setSectionState(self.segCollapsibleButton,   enabled=False, collapsed=True)
+            self._setSectionState(self.skelCollapsibleButton,  enabled=True,  collapsed=False)
+            # self._setSectionState(self.featExCollapsibleButton,enabled=False, collapsed=True)
+
+    def onInputNodeChanged(self, node) -> None:
+        self._stopSegmentPicking()
+
+        # Hide previously shown nodes
+        if hasattr(self, '_currentDisplayNode') and self._currentDisplayNode:
+            self._currentDisplayNode.SetVisibility(False)
+        if hasattr(self, '_currentVolumeRenderingDisplayNode') and self._currentVolumeRenderingDisplayNode:
+            self._currentVolumeRenderingDisplayNode.SetVisibility(False)
+
+        self._currentDisplayNode = None
+        self._currentVolumeRenderingDisplayNode = None
+
+        if node is None:
+            return
+
+        if node.IsA("vtkMRMLScalarVolumeNode"):
+            self._segmentationNode = None
+            volRenLogic = slicer.modules.volumerendering.logic()
+            vrDisplayNode = volRenLogic.GetFirstVolumeRenderingDisplayNode(node)
+            if not vrDisplayNode:
+                volRenLogic.CreateDefaultVolumeRenderingNodes(node)
+                vrDisplayNode = volRenLogic.GetFirstVolumeRenderingDisplayNode(node)
+            vrDisplayNode.SetVisibility(True)
+            self._currentVolumeRenderingDisplayNode = vrDisplayNode
+            self.segmentsTableWidget.setVisible(False)
+
+        elif node.IsA("vtkMRMLSegmentationNode"):
+            self._segmentationNode = node
+            if not node.GetDisplayNode():
+                node.CreateDefaultDisplayNodes()
+            if not node.GetSegmentation().ContainsRepresentation("Closed surface"):
+                node.CreateClosedSurfaceRepresentation()
+            displayNode = node.GetDisplayNode()
+            displayNode.SetVisibility(True)
+            displayNode.SetVisibility3D(True)
+            displayNode.SetVisibility2DFill(True)
+            segmentation = node.GetSegmentation()
+            for i in range(segmentation.GetNumberOfSegments()):
+                displayNode.SetSegmentVisibility(segmentation.GetNthSegmentID(i), True)
+            self._currentDisplayNode = displayNode
+
+            self._populateSegmentsTable(node)
+            self.segmentsTableWidget.setVisible(True)
+
+            # Start ray cast picking
+            self._startSegmentPicking(node)
+
+        # Reset 3D view
+        layoutManager = slicer.app.layoutManager()
+        threeDWidget = layoutManager.threeDWidget(0)
+        threeDView = threeDWidget.threeDView()
+        threeDView.rotateToViewAxis(3)  # look from anterior direction
+          # reset the 3D view cube size and center it
+
+        # Set camera angle
+        renderWindow = threeDView.renderWindow()
+        renderer = renderWindow.GetRenderers().GetFirstRenderer()
+        camera = renderer.GetActiveCamera()
+        camera.SetPosition(-1300, 900, 1500)
+        camera.SetFocalPoint(-25, 133, 1500)
+        camera.SetViewUp(-0.0032600386718052606, -0.050379519790934586, 0.998724825031146)
+        camera.Dolly(4)
+        renderer.ResetCameraClippingRange()
+        renderWindow.Render()
+        threeDView.resetFocalPoint()
+
+    def onSegMethodChanged(self, button) -> None:
+        method = button.text
+        if method == "nnUNetv2":
+            self.nnUNetOptionsGroupBox.setVisible(True)
+        else:
+            self.nnUNetOptionsGroupBox.setVisible(False)
+
+    def onSkelMethodChanged(self, button) -> None:
+        pass
+
+
+    def onApplySegButton(self):
+        """
+        Run processing when user clicks "Run Segmentation" button.
+        """
+
+        # Get selected volume node
+        volumeNode = self.inputSelector.currentNode()
+        if volumeNode is None:
+            slicer.util.errorDisplay("No volume selected.")
+            return
+        
+        # Check segmentation method
+
+        # TODO if nnunet:
+        try:
+            from SlicerNNUNetLib import SegmentationLogic, Parameter
+        except ImportError:
+            slicer.util.errorDisplay("Slicer nnU-Net extension is not installed.")
+            return
+        
+        self._parameterNode.parameter.toSettings()
+        self.logic.startNnUNetSegmentation(
+            self.getCurrentVolumeNode(),
+            parameter=self._parameterNode.params
+        )
+
+    def onApplySkelButton(self) -> None:
+        """
+        Run processing when user clicks "Run Skeletonization" button.
+        """
+        inputNode = self.inputSelector.currentNode()
+        if inputNode is None:
+            slicer.util.errorDisplay("No input selected.")
+            return
+        
+        # Get Method
+        # startTime = time.time()
+
+        self.runSkelPushButton.setText("Running... 0%")
+        self.runSkelPushButton.setEnabled(False)
+
+        method = self.skelMethodGroup.checkedButton().text        
+        if method == "VMTK Extract Centerline":
+            self._runVMTKCenterlineExtraction(inputNode)
+        elif method == "Medial axis thinning":
+            self._runVoxelSkeletonization(inputNode)
+
+        # self._setSectionState(self.skelCollapsibleButton,   enabled=True, collapsed=True)
+        # self._setSectionState(self.featExCollapsibleButton, enabled=True, collapsed=False)
+
+    def getCurrentVolumeNode(self):
+        return self.inputSelector.currentNode()        
+
+    def _setSectionState(self, collapsibleButton, enabled, collapsed):
+        collapsibleButton.setEnabled(enabled)
+        collapsibleButton.collapsed = collapsed
+
+    def _onToggleAllSegmentVisibility(self):
+        self._allSegmentVisibleState = not self._allSegmentVisibleState
+        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
+        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
+        icon = visIcon if self._allSegmentVisibleState else invisIcon
+        self._segVisHeaderButton.setIcon(icon)
+
+        segmentationNode = self.inputSelector.currentNode()
+        if not segmentationNode:
+            return
+
+        segmentation = segmentationNode.GetSegmentation()
+        displayNode = segmentationNode.GetDisplayNode()
+
+        for i in range(self.segmentsTableWidget.rowCount):
+            segmentId = segmentation.GetNthSegmentID(i)
+            displayNode.SetSegmentVisibility(segmentId, self._allSegmentVisibleState)
+            btn = self.segmentsTableWidget.cellWidget(i, 0)
+            if btn:
+                btn.setIcon(icon)
+                btn.setProperty("segmentVisible", self._allSegmentVisibleState)
+
+    def _startSegmentPicking(self, segmentationNode):
+        self._stopSegmentPicking()
+
+        self._pickingSegmentationNode = segmentationNode
+
+        layoutManager = slicer.app.layoutManager()
+        threeDWidget = layoutManager.threeDWidget(0)
+        self._pickingInteractor = threeDWidget.threeDView().interactor()
+
+        self._pickingObserverTag = self._pickingInteractor.AddObserver(
+            vtk.vtkCommand.LeftButtonPressEvent,
+            self._onPickClick,
+            1.0
+        )
+
+    def _stopSegmentPicking(self):
+        if self._tooltipLabel:
+            self._tooltipLabel.hide()
+            
+        if hasattr(self, '_pickingInteractor') and self._pickingInteractor and \
+        hasattr(self, '_pickingObserverTag') and self._pickingObserverTag:
+            self._pickingInteractor.RemoveObserver(self._pickingObserverTag)
+        self._pickingInteractor = None
+        self._pickingObserverTag = None
+        self._pickingSegmentationNode = None
+
+    def _populateSegmentsTable(self, segmentationNode):
+        segmentation = segmentationNode.GetSegmentation()
+        nSegments = segmentation.GetNumberOfSegments()
+
+        self.segmentsTableWidget.setRowCount(nSegments)
+
+        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
+        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
+        displayNode = segmentationNode.GetDisplayNode()
+
+        for i in range(nSegments):
+            segmentId = segmentation.GetNthSegmentID(i)
+            segment = segmentation.GetSegment(segmentId)
+            r, g, b = segment.GetColor()
+
+            # Visibility toggle
+            isVisible = displayNode.GetSegmentVisibility3D(segmentId)
+            visButton = qt.QPushButton()
+            visButton.setIcon(visIcon if isVisible else invisIcon)
+            visButton.setFlat(True)
+            visButton.setFixedSize(20, 20)
+            visButton.setIconSize(qt.QSize(16, 16))
+            visButton.setProperty("segmentId", segmentId)
+            visButton.setProperty("segmentVisible", isVisible)
+            visButton.connect("clicked()", lambda sid=segmentId, btn=visButton: self._onSegmentVisibilityToggled(sid, btn))
+            self.segmentsTableWidget.setCellWidget(i, 0, visButton)
+
+            # Color swatch
+            colorItem = qt.QTableWidgetItem()
+            colorItem.setBackground(qt.QColor(int(r*255), int(g*255), int(b*255)))
+            colorItem.setFlags(qt.Qt.ItemIsEnabled)
+            self.segmentsTableWidget.setItem(i, 1, colorItem)
+
+            # Segment name
+            self.segmentsTableWidget.setItem(i, 2, qt.QTableWidgetItem(segment.GetName()))
+       
+        colPos = self.segmentsTableWidget.columnViewportPosition(0)
+        colWidth = self.segmentsTableWidget.columnWidth(0)
+        self._segVisHeaderButton.move(colPos + (colWidth - 24) // 2, 2)        
+        self._segVisHeaderButton.setVisible(True)
+
+    def _onSegmentVisibilityToggled(self, segmentId, button):
+        segmentationNode = self.inputSelector.currentNode()
+        if not segmentationNode:
+            return
+
+        displayNode = segmentationNode.GetDisplayNode()
+        isVisible = not button.property("segmentVisible")
+        displayNode.SetSegmentVisibility(segmentId, isVisible)
+        button.setProperty("segmentVisible", isVisible)
+
+        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
+        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
+        button.setIcon(visIcon if isVisible else invisIcon)
+
+    def _onPickClick(self, caller, event):
+        if self._tooltipLabel:
+            self._tooltipLabel.hide()
+
+        layoutManager = slicer.app.layoutManager()
+        threeDWidget = layoutManager.threeDWidget(0)
+        threeDView = threeDWidget.threeDView()
+
+        # Get click position in display coordinates
+        interactor = threeDView.interactor()
+        x, y = interactor.GetEventPosition()
+
+        # Use hardware picker to find the picked cell
+        picker = vtk.vtkCellPicker()
+        picker.SetTolerance(0.005)
+        renderWindow = threeDView.renderWindow()
+        renderer = renderWindow.GetRenderers().GetFirstRenderer()
+        picker.Pick(x, y, 0, renderer)
+
+        pickedPosition = picker.GetPickPosition()
+
+        result = picker.Pick(x, y, 0, renderer)
+        print(f"Picker result: {result}, cellId: {picker.GetCellId()}, position: {picker.GetPickPosition()}")
+
+
+        # Find which segment contains this RAS point
+        segmentation = self._pickingSegmentationNode.GetSegmentation()
+        for i in range(segmentation.GetNumberOfSegments()):
+            segmentId = segmentation.GetNthSegmentID(i)
+            segmentName = segmentation.GetNthSegment(i).GetName()
+
+            polyData = vtk.vtkPolyData()
+            self._pickingSegmentationNode.GetClosedSurfaceRepresentation(segmentId, polyData)
+
+            if polyData.GetNumberOfPoints() == 0:
+                continue
+
+            # Check if picked position is close to this segment's surface
+            pointLocator = vtk.vtkPointLocator()
+            pointLocator.SetDataSet(polyData)
+            pointLocator.BuildLocator()
+            closestPointId = pointLocator.FindClosestPoint(pickedPosition)
+            closestPoint = polyData.GetPoint(closestPointId)
+
+            dist = vtk.vtkMath.Distance2BetweenPoints(pickedPosition, closestPoint)
+            if dist < 10:  # threshold in mm², adjust as needed
+                print(f"Clicked segment: {segmentName} (ID: {segmentId})")
+
+                self._showPickLabel(segmentName, threeDView, x, y)
+
+                slicer.util.showStatusMessage(f"Segment: {segmentName}", 3000)
+                return
+            
+        print("No segment matched distance threshold")
+
+    def _showPickLabel(self, text, threeDView, x, y):
+        if self._tooltipLabel is None:
+            self._tooltipLabel = qt.QLabel(threeDView)
+            self._tooltipLabel.setStyleSheet("""
+                QLabel {
+                    background-color: #cce7ff;
+                    border: 1px solid #888;
+                    padding: 3px 6px;
+                    font-size: 20px;
+                    color: #000;
+                }
+            """)
+            self._tooltipLabel.setWindowFlags(qt.Qt.SubWindow)
+            self._tooltipTimer = qt.QTimer()
+            self._tooltipTimer.setSingleShot(True)
+            self._tooltipTimer.connect("timeout()", self._tooltipLabel.hide)
+
+        self._tooltipLabel.setText(text)
+        self._tooltipLabel.adjustSize()
+
+        flippedY = threeDView.height - y
+        self._tooltipLabel.move(x + 10, flippedY - 20)
+        self._tooltipLabel.show()
+        self._tooltipLabel.raise_()
+
+        self._tooltipTimer.start(1000)
+
+    def _runVoxelSkeletonization(self, inputNode):
+        # Remove CL columns if they exist
+        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
+                   for c in range(self.segmentsTableWidget.columnCount)]
+        for colName in ["CL Points"]:
+            if colName in headers:
+                self.segmentsTableWidget.removeColumn(headers.index(colName))
+                headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
+                           for c in range(self.segmentsTableWidget.columnCount)]
+        self._clVisHeaderButton.setVisible(False)
+        self._allCenterlineVisibleState = True
+
+        labelmapNode = None
+
+        if self.unsegmentedRadio.isChecked():
+            volumeArray   = slicer.util.arrayFromVolume(inputNode)
+            referenceNode = inputNode
+            print(f"Using scalar volume: {inputNode.GetName()}")
+        else:
+            labelmapNode  = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
+            slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
+                inputNode, labelmapNode, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY
+            )
+
+        volumeArray   = slicer.util.arrayFromVolume(labelmapNode)
+        referenceNode = labelmapNode
+        print(f"Using segmentation: {inputNode.GetName()}")
+
+        self._ijkToRas = vtk.vtkMatrix4x4()
+        referenceNode.GetIJKToRASMatrix(self._ijkToRas)
+        segmentation = inputNode.GetSegmentation()
+
+        # extract spacing here, before creating the logic
+        voxelSpacing = [
+            np.linalg.norm([self._ijkToRas.GetElement(r, 0) for r in range(3)]),
+            np.linalg.norm([self._ijkToRas.GetElement(r, 1) for r in range(3)]),
+            np.linalg.norm([self._ijkToRas.GetElement(r, 2) for r in range(3)]),
+        ]
+
+         # --- Set up logic (same signal pattern as nnUNet) ---
+        self.skelLogic.progressInfo.connect(self.onProgressInfo)
+        self.skelLogic.errorOccurred.connect(self.onSkelError)
+        self.skelLogic.skelFinished.connect(
+            lambda *args: self.onSkelFinished()
+        )
+
+        self.skelLogic.progressUpdated.connect(self.onSkelProgress)
+        self._setButtonProgress(self.runSkelPushButton, 0, 1, "Skeletonizing...")
+        self.skelLogic.startSkeletonization(volumeArray, segmentation, self._ijkToRas, voxelSpacing)
+
+    def onSkelProgress(self, current, total):
+        self._setButtonProgress(self.runSkelPushButton, current, total, "Skeletonizing...")
+        
+
+    def onSkelFinished(self):
+        try:
+            self._skeletonsBySegment = self.skelLogic.loadResults(self._segmentationNode, self._ijkToRas)
+        except RuntimeError as e:
+            slicer.util.errorDisplay(str(e))
+            return
+        finally:
+            self._resetButton(self.runSkelPushButton, "▶︎ Run Skeletonization")
+
+        self._addCenterlineColumns()
+        self._populateFeatureColumns()
+
+
+    def onSkelError(self, errorMsg):
+        print(f"Error: {errorMsg} ")
+        # if self.isStopping:
+        #     return
+
+        # self._setApplyVisible(True)
+        # if isinstance(errorMsg, Exception):
+        #     errorMsg = str(errorMsg)
+        # self._reportError("Encountered error during inference :\n" + errorMsg, doTraceback=False)
+
+
+
+    
+    # Buttons
+    def _setButtonProgress(self, button, value, maximum, text="Running..."):
+        pct = int(value / maximum * 100) if maximum > 0 else 0
+        button.setText(f"{text} {pct}%")
+        button.setStyleSheet(f"""
+            QPushButton {{
+                text-align: center;
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #4a90d9,
+                    stop:{pct/100:.3f} #4a90d9,
+                    stop:{min(pct/100 + 0.001, 1.0):.3f} #e8e8e8,
+                    stop:1 #e8e8e8
+                );
+                border: 1px solid #aaa;
+            }}
+        """)
+        button.setEnabled(False)
+        slicer.app.processEvents()
+
+
+    def _resetButton(self, button, originalText):
+        button.setText(originalText)
+        button.setStyleSheet("")
+        button.setEnabled(True)
+
+
+    # Table
+    def _addCenterlineColumns(self):
+        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
+
+        # Check if columns already exist
+        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text() 
+                   for c in range(self.segmentsTableWidget.columnCount)]
+
+        if "CL Points" not in headers:
+            clPtsCol = self.segmentsTableWidget.columnCount
+            self.segmentsTableWidget.insertColumn(clPtsCol)
+            self.segmentsTableWidget.setHorizontalHeaderItem(clPtsCol, qt.QTableWidgetItem("CL Points"))
+            self.segmentsTableWidget.setColumnWidth(clPtsCol, 110)
+        else:
+            clPtsCol = headers.index("CL Points")
+
+        segmentationNode = self.inputSelector.currentNode()
+        segmentation = segmentationNode.GetSegmentation()
+
+        for i in range(self.segmentsTableWidget.rowCount):
+            segmentId = segmentation.GetNthSegmentID(i)
+            segmentName = segmentation.GetSegment(segmentId).GetName()
+            skelNode = self._skeletonsBySegment.get(segmentName, {}).get("modelNode")
+            nPts = skelNode.GetPolyData().GetNumberOfPoints() if skelNode else 0
+
+            # Reuse existing button if column already existed
+            existingWidget = self.segmentsTableWidget.cellWidget(i, clPtsCol)
+            if existingWidget:
+                btn = existingWidget.findChild(qt.QPushButton)
+            else:
+                btn = None
+
+            if btn is None:
+                cellWidget = qt.QWidget()
+                cellLayout = qt.QHBoxLayout(cellWidget)
+                cellLayout.setContentsMargins(2, 0, 2, 0)
+
+                clVisBtn = qt.QPushButton()
+                clVisBtn.setIcon(visIcon)
+                clVisBtn.setFlat(True)
+                clVisBtn.setFixedSize(20, 20)
+                clVisBtn.setIconSize(qt.QSize(16, 16))
+                clVisBtn.setProperty("segmentName", segmentName)
+                clVisBtn.setProperty("clVisible", True)
+                clVisBtn.connect("clicked()", lambda btn=clVisBtn, name=segmentName: self._onCenterlineVisibilityToggled(name, btn))
+
+                ptsLabel = qt.QLabel(str(nPts))
+                cellLayout.addWidget(clVisBtn)
+                cellLayout.addWidget(ptsLabel)
+                cellLayout.addStretch()
+                self.segmentsTableWidget.setCellWidget(i, clPtsCol, cellWidget)
+            else:
+                # Just update the label
+                label = existingWidget.findChild(qt.QLabel)
+                if label:
+                    label.setText(str(nPts))
+
+        # Position header eye button over CL Points column
+        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
+                   for c in range(self.segmentsTableWidget.columnCount)]
+        clPtsCol = headers.index("CL Points")
+        colPos = self.segmentsTableWidget.columnViewportPosition(clPtsCol)
+        self._clVisHeaderButton.move(colPos + 2, 2)
+        self._clVisHeaderButton.setVisible(True)
+
+
+    def _onCenterlineVisibilityToggled(self, segmentName, button):
+        skelNode = self._skeletonsBySegment.get(segmentName, {}).get("modelNode")
+        if not skelNode:
+            return
+
+        isVisible = not button.property("clVisible")
+        skelNode.GetDisplayNode().SetVisibility(isVisible)
+        button.setProperty("clVisible", isVisible)
+
+        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
+        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
+        button.setIcon(visIcon if isVisible else invisIcon)
+
+    def _onToggleAllCenterlineVisibility(self):
+        self._allCenterlineVisibleState = not self._allCenterlineVisibleState
+        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
+        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
+        self._clVisHeaderButton.setIcon(visIcon if self._allCenterlineVisibleState else invisIcon)
+
+        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
+                   for c in range(self.segmentsTableWidget.columnCount)]
+        if "CL Points" not in headers:
+            return
+        clVisCol = headers.index("CL Points")
+
+        for i in range(self.segmentsTableWidget.rowCount):
+            cellWidget = self.segmentsTableWidget.cellWidget(i, clVisCol)
+            btn = cellWidget.findChild(qt.QPushButton) if cellWidget else None
+            if not btn:
+                continue
+            segmentName = btn.property("segmentName")
+            skelNode = self._skeletonsBySegment.get(segmentName, {}).get("modelNode")
+            if skelNode:
+                skelNode.GetDisplayNode().SetVisibility(self._allCenterlineVisibleState)
+            btn.setIcon(visIcon if self._allCenterlineVisibleState else invisIcon)
+            btn.setProperty("clVisible", self._allCenterlineVisibleState)
+
+    def _populateFeatureColumns(self):
+        # --- Remove existing metric columns ---
+        metricColNames = ["Length (mm)", "Tortuosity", "Mean Radius (mm)"]
+        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
+                for c in range(self.segmentsTableWidget.columnCount)]
+        for colName in metricColNames:
+            if colName in headers:
+                self.segmentsTableWidget.removeColumn(headers.index(colName))
+                headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
+                        for c in range(self.segmentsTableWidget.columnCount)]
+
+        # --- Add metric columns ---
+        for colName in metricColNames:
+            col = self.segmentsTableWidget.columnCount
+            self.segmentsTableWidget.insertColumn(col)
+            item = qt.QTableWidgetItem(colName)
+            font = item.font()
+            font.setPointSize(9)
+            item.setFont(font)
+            self.segmentsTableWidget.setHorizontalHeaderItem(col, item)
+            self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(col, qt.QHeaderView.Stretch)
+
+        # --- Populate values ---
+        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
+                for c in range(self.segmentsTableWidget.columnCount)]
+
+        metricToHeader = {
+            "length":      "Length (mm)",
+            "tortuosity":  "Tortuosity",
+            "mean_radius": "Mean Radius (mm)",
+        }
+
+        for i in range(self.segmentsTableWidget.rowCount):
+            segmentation = self._segmentationNode.GetSegmentation()
+            segmentId    = segmentation.GetNthSegmentID(i)
+            segmentName  = segmentation.GetSegment(segmentId).GetName()
+
+            data     = self._skeletonsBySegment.get(segmentName, {})
+            features = data.get("features", {}) if isinstance(data, dict) else {}
+
+            for featureKey, headerName in metricToHeader.items():
+                if headerName not in headers:
+                    continue
+                col   = headers.index(headerName)
+                value = features.get(featureKey, "N/A")
+                text  = f"{value:.3f}" if isinstance(value, float) else str(value)
+                self.segmentsTableWidget.setItem(i, col, qt.QTableWidgetItem(text))
+
+    def _repositionCLHeaderButton(self, *args):
+        if not self._clVisHeaderButton.isVisible():
+            return
+        for c in range(self.segmentsTableWidget.columnCount):
+            item = self.segmentsTableWidget.horizontalHeaderItem(c)
+            if item and item.text() == "CL Points":
+                colPos = self.segmentsTableWidget.columnViewportPosition(c)
+                self._clVisHeaderButton.move(colPos + 2, 2)
+                return
+            
+    def onProgressInfo(self, infoMsg):
+        print(infoMsg)
+        # self.ui.logTextEdit.insertPlainText(self._formatMsg(infoMsg) + "\n")
+        # self.moveTextEditToEnd(self.ui.logTextEdit)
+        # slicer.app.processEvents()
+
+    @staticmethod
+    def _formatMsg(infoMsg):
+        return "\n".join([msg for msg in infoMsg.strip().splitlines()])
+
+    @staticmethod
+    def moveTextEditToEnd(textEdit):
+        textEdit.verticalScrollBar().setValue(textEdit.verticalScrollBar().maximum)
