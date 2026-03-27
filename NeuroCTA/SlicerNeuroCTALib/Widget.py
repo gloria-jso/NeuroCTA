@@ -13,6 +13,7 @@ from .InstallLogic import InstallLogic, InstallLogicProtocol
 from .Parameter import Parameter
 from .Logic import Logic, LogicProtocol, SkeletonizationLogic
 from .Signal import Signal
+from .VesselTableManager import VesselTableManager
 
 import time
 
@@ -36,8 +37,18 @@ class Widget(qt.QWidget):
             parent=None
     ):
         super().__init__(parent)
+
         self.logic = logic or Logic()
         self.skelLogic = skeletonizationLogic or SkeletonizationLogic()
+        self.vesselTable = VesselTableManager()
+
+
+        self._currentDisplayNode = None
+        self._pickingSegmentationNode = None
+        self._pickingInteractor = None
+        self._pickingObserverTag = None
+        self._tooltipLabel = None
+        self._ijkToRas = None
 
         # Instantiate widget UI
         layout = qt.QVBoxLayout(self)
@@ -80,54 +91,9 @@ class Widget(qt.QWidget):
         inputsFormLayout.addRow(self.inputLabel, self.inputSelector)
 
         # --- Segments Table
-        self.segmentsTableWidget = qt.QTableWidget() 
-        self.segmentsTableWidget.setColumnCount(3)
-        self.segmentsTableWidget.setEditTriggers(qt.QTableWidget.NoEditTriggers)
-        self.segmentsTableWidget.setAlternatingRowColors(True)
-        self.segmentsTableWidget.setMinimumHeight(150)
-        self.segmentsTableWidget.setSelectionBehavior(qt.QTableWidget.SelectRows)
-        self.segmentsTableWidget.verticalHeader().setDefaultSectionSize(24)
-
-        # add button in header to hide/show all segments
-        self._allSegmentVisibleState = True
-        self._segVisHeaderButton = qt.QPushButton(self.segmentsTableWidget.horizontalHeader())
-        self._segVisHeaderButton.setIcon(qt.QIcon(":/Icons/Small/SlicerVisible.png"))
-        self._segVisHeaderButton.setFlat(True)
-        self._segVisHeaderButton.setFixedSize(20, 20)
-        self._segVisHeaderButton.setIconSize(qt.QSize(16, 16))
-        self._segVisHeaderButton.setVisible(False)
-        self.segmentsTableWidget.setColumnWidth(0, 24)
-        self._segVisHeaderButton.connect("clicked()", self._onToggleAllSegmentVisibility)
-
-        # segment colour
-        self.segmentsTableWidget.setHorizontalHeaderLabels(["", "", "Segment"])
-        self.segmentsTableWidget.setColumnWidth(1, 24)
-        # self.segmentsTableWidget.connect("cellClicked(int,int)", self._onSegmentsTableCellClicked) # open QColorDialog
-
-        # column resizing -- fix segment visibility and colour, stretch Segment
-        self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.Fixed)
-        self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.Fixed)
-        self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.Stretch)
-
-        # Centreline -- only show after skeletonization
-        self._allCenterlineVisibleState = True
-        self._clVisHeaderButton = qt.QPushButton(self.segmentsTableWidget.horizontalHeader())
-        self._clVisHeaderButton.setIcon(qt.QIcon(":/Icons/Small/SlicerVisible.png"))
-        self._clVisHeaderButton.setFlat(True)
-        self._clVisHeaderButton.setFixedSize(20, 20)
-        self._clVisHeaderButton.setIconSize(qt.QSize(16, 16))
-        self._clVisHeaderButton.setVisible(False)
-        self._clVisHeaderButton.connect("clicked()", self._onToggleAllCenterlineVisibility)
-
-        self.segmentsTableWidget.horizontalHeader().connect(
-            "sectionResized(int,int,int)", self._repositionCLHeaderButton)
-        self.segmentsTableWidget.horizontalHeader().connect(
-            "sectionMoved(int,int,int)", self._repositionCLHeaderButton)
-
-        # only turn on Segment table if input type is Segmentation
-        self.segmentsTableWidget.setVisible(False)
+        self.vesselTable.setVisible(False)
         inputsFormLayout.addItem(qt.QSpacerItem(0, 6))
-        inputsFormLayout.addRow(self.segmentsTableWidget)
+        inputsFormLayout.addRow(self.vesselTable)
 
 
         # ─────────────────── Segmentation collapsible ────────────────────────
@@ -194,7 +160,7 @@ class Widget(qt.QWidget):
             }
         """)
 
-        self.skelCollapsibleButton.text = "Skeletonization & Feature Extraction"
+        self.skelCollapsibleButton.text = "Skeletonization and Feature Extraction"
         self.skelCollapsibleButton.collapsed = True
         layout.addWidget(self.skelCollapsibleButton)
         skeletonizationFormLayout = qt.QFormLayout(self.skelCollapsibleButton)
@@ -220,59 +186,12 @@ class Widget(qt.QWidget):
         self.runSkelPushButton = qt.QPushButton("▶︎ Run Skeletonization")
         skeletonizationFormLayout.addRow("", self.runSkelPushButton)
 
+        self.showBranchingPointsCheckBox = qt.QCheckBox("Show branching points")
+        self.showBranchingPointsCheckBox.setChecked(True)
+        self.showBranchingPointsCheckBox.setEnabled(False)
+        skeletonizationFormLayout.addRow("", self.showBranchingPointsCheckBox)
+
         layout.addStretch(1)
-
-
-
-        # # ── Feature Extraction collapsible ─────────────────────────────────────────
-        # self.featExCollapsibleButton = ctk.ctkCollapsibleButton()
-        # self.featExCollapsibleButton.setStyleSheet("""
-        #     ctkCollapsibleButton {
-        #         background-color: #d9dbd9;  /* background color */
-        #         border: 1px solid gray;
-        #         border-radius: 4px;
-        #     }
-        # """)
-        # self.featExCollapsibleButton.text = "Feature Extraction"
-        # self.featExCollapsibleButton.collapsed = True
-        # layout.addWidget(self.featExCollapsibleButton)
-
-        # # Form layout inside collapsible
-        # featExFormLayout = qt.QFormLayout(self.featExCollapsibleButton)
-        # featExFormLayout.setContentsMargins(12,12,12,12)
-
-        # # Section label
-        # featExFormLayout.addRow(qt.QLabel("Morphological:"))
-
-        # # Grid layout for checkboxes (2 columns × 2 rows)
-        # featOptionsGrid = qt.QGridLayout()
-        # featOptionsGrid.setContentsMargins(10,0,0,0)
-        # # Create checkboxes
-        # self.diameterChk = qt.QCheckBox("Diameter")
-        # self.tortuosityChk = qt.QCheckBox("Tortuosity")
-        # self.lengthChk = qt.QCheckBox("Length")
-        # self.diameterChk.setChecked(True)
-        # self.tortuosityChk.setChecked(True)
-        # self.lengthChk.setChecked(True)
-
-        # # Add checkboxes to the grid
-        # featOptionsGrid.addWidget(self.diameterChk, 0, 0)
-        # featOptionsGrid.addWidget(self.tortuosityChk, 0, 1)
-        # featOptionsGrid.addWidget(self.lengthChk, 1, 0)
-
-        # # Align left
-        # featOptionsGrid.setAlignment(qt.Qt.AlignLeft)
-        # featOptionsGrid.setHorizontalSpacing(10)
-        # featOptionsGrid.setVerticalSpacing(4)
-
-        # # Add the grid to the form layout
-        # featExFormLayout.addRow(featOptionsGrid)
-        # featExFormLayout.addItem(qt.QSpacerItem(0, 5))
-
-        # # Run button
-        # self.runFeatExPushButton = qt.QPushButton("▶︎ Run Feature Extraction")
-        # featExFormLayout.addRow("", self.runFeatExPushButton)
-        # layout.addStretch(1)
 
 
         # ── Connections ─────────────────────────────────────────────────────────
@@ -289,6 +208,8 @@ class Widget(qt.QWidget):
 
         self.runSegPushButton.connect("clicked(bool)", self.onApplySegButton)
         self.runSkelPushButton.connect("clicked(bool)", self.onApplySkelButton)
+        self.showBranchingPointsCheckBox.connect("toggled(bool)", self.onToggleBranchingPoints)
+
 
         # self.runFeatExPushButton.connect("clicked(bool)", self.onApplyFeatExButton)
 
@@ -297,6 +218,15 @@ class Widget(qt.QWidget):
 
         # Logic connections
         self.logic.progressInfo.connect(self.onProgressInfo)
+
+        # Skel connections
+        self.skelLogic.progressInfo.connect(self.onProgressInfo)
+        self.skelLogic.errorOccurred.connect(self.onSkelError)
+        self.skelLogic.skelFinished.connect(
+            lambda *args: self.onSkelFinished()
+        )
+
+        self.skelLogic.progressUpdated.connect(self.onSkelProgress)
 
 
         # Create parameter node and connect GUI
@@ -316,13 +246,7 @@ class Widget(qt.QWidget):
                 # "parameter.disableTta": self.ui.disableTtaCheckBox
             }
         )
-        
-        self._currentDisplayNode = None
-        self._pickingSegmentationNode = None
-        self._pickingInteractor = None
-        self._pickingObserverTag = None
-        self._tooltipLabel = None
-        self._ijkToRas = None
+    
 
     @staticmethod
     def _createParameterNode() -> WidgetParameterNode:
@@ -335,6 +259,7 @@ class Widget(qt.QWidget):
         parameterNode.SetAttribute("ModuleName", moduleName)
         return WidgetParameterNode(parameterNode)
 
+    # Node handling
     def onInputTypeChanged(self) -> None:
         """Update the input selector label based on the selected input type."""
 
@@ -377,7 +302,7 @@ class Widget(qt.QWidget):
                 vrDisplayNode = volRenLogic.GetFirstVolumeRenderingDisplayNode(node)
             vrDisplayNode.SetVisibility(True)
             self._currentVolumeRenderingDisplayNode = vrDisplayNode
-            self.segmentsTableWidget.setVisible(False)
+            self.vesselTable.setVisible(False)
 
         elif node.IsA("vtkMRMLSegmentationNode"):
             self._segmentationNode = node
@@ -394,8 +319,8 @@ class Widget(qt.QWidget):
                 displayNode.SetSegmentVisibility(segmentation.GetNthSegmentID(i), True)
             self._currentDisplayNode = displayNode
 
-            self._populateSegmentsTable(node)
-            self.segmentsTableWidget.setVisible(True)
+            self.vesselTable.populateSegments(node)
+            self.vesselTable.setVisible(True)
 
             # Start ray cast picking
             self._startSegmentPicking(node)
@@ -419,15 +344,17 @@ class Widget(qt.QWidget):
         renderWindow.Render()
         threeDView.resetFocalPoint()
 
+    def getCurrentVolumeNode(self):
+        return self.inputSelector.currentNode()        
+
+
+    # Segmentation
     def onSegMethodChanged(self, button) -> None:
         method = button.text
         if method == "nnUNetv2":
             self.nnUNetOptionsGroupBox.setVisible(True)
         else:
             self.nnUNetOptionsGroupBox.setVisible(False)
-
-    def onSkelMethodChanged(self, button) -> None:
-        pass
 
 
     def onApplySegButton(self):
@@ -456,6 +383,10 @@ class Widget(qt.QWidget):
             parameter=self._parameterNode.params
         )
 
+    # Skeletonization
+    def onSkelMethodChanged(self, button) -> None:
+        pass
+
     def onApplySkelButton(self) -> None:
         """
         Run processing when user clicks "Run Skeletonization" button.
@@ -465,8 +396,11 @@ class Widget(qt.QWidget):
             slicer.util.errorDisplay("No input selected.")
             return
         
-        # Get Method
-        # startTime = time.time()
+        if self._hasExistingResults(inputNode):
+            if not slicer.util.confirmYesNoDisplay(
+                f"Results already exist for {inputNode.GetName()}. Re-run and overwrite?"
+            ):
+                return
 
         self.runSkelPushButton.setText("Running... 0%")
         self.runSkelPushButton.setEnabled(False)
@@ -480,35 +414,77 @@ class Widget(qt.QWidget):
         # self._setSectionState(self.skelCollapsibleButton,   enabled=True, collapsed=True)
         # self._setSectionState(self.featExCollapsibleButton, enabled=True, collapsed=False)
 
-    def getCurrentVolumeNode(self):
-        return self.inputSelector.currentNode()        
+    def _runVoxelSkeletonization(self, inputNode):
+        labelmapNode = None
+        volumeArray = None
 
-    def _setSectionState(self, collapsibleButton, enabled, collapsed):
-        collapsibleButton.setEnabled(enabled)
-        collapsibleButton.collapsed = collapsed
+        if self.unsegmentedRadio.isChecked():
+            volumeArray   = slicer.util.arrayFromVolume(inputNode)
+            referenceNode = inputNode
+            print(f"Using scalar volume: {inputNode.GetName()}")
+        else:
+            labelmapNode  = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
+            slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
+                inputNode, labelmapNode, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY
+            )
 
-    def _onToggleAllSegmentVisibility(self):
-        self._allSegmentVisibleState = not self._allSegmentVisibleState
-        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
-        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
-        icon = visIcon if self._allSegmentVisibleState else invisIcon
-        self._segVisHeaderButton.setIcon(icon)
+        volumeArray   = slicer.util.arrayFromVolume(labelmapNode)
+        referenceNode = labelmapNode
+        print(f"Using segmentation: {inputNode.GetName()}")
 
-        segmentationNode = self.inputSelector.currentNode()
-        if not segmentationNode:
+        self._ijkToRas = vtk.vtkMatrix4x4()
+        referenceNode.GetIJKToRASMatrix(self._ijkToRas)
+        segmentation = inputNode.GetSegmentation()
+
+        # extract spacing here, before creating the logic
+        voxelSpacing = [
+            np.linalg.norm([self._ijkToRas.GetElement(r, 0) for r in range(3)]),
+            np.linalg.norm([self._ijkToRas.GetElement(r, 1) for r in range(3)]),
+            np.linalg.norm([self._ijkToRas.GetElement(r, 2) for r in range(3)]),
+        ]
+
+         # --- Set up logic (same signal pattern as nnUNet) ---
+        self._setButtonProgress(self.runSkelPushButton, 0, 1, "Skeletonizing...")
+        self.skelLogic.startSkeletonization(volumeArray, segmentation, self._ijkToRas, voxelSpacing)
+
+    def onSkelProgress(self, current, total):
+        self._setButtonProgress(self.runSkelPushButton, current, total, "Skeletonizing...")
+        
+
+    def onSkelFinished(self):
+        try:
+            skeletons = self.skelLogic.loadResults(self._segmentationNode, self._ijkToRas)
+        except RuntimeError as e:
+            slicer.util.errorDisplay(str(e))
             return
+        finally:
+            self._resetButton(self.runSkelPushButton, "▶︎ Run Skeletonization")
 
-        segmentation = segmentationNode.GetSegmentation()
-        displayNode = segmentationNode.GetDisplayNode()
+        self.vesselTable.setSkeletons(skeletons) 
+        self.vesselTable.removeCLColumns()
+        self.vesselTable.populateCLColumn()
+        self.vesselTable.populateFeatureColumns()
+        self.showBranchingPointsCheckBox.setEnabled(True)
 
-        for i in range(self.segmentsTableWidget.rowCount):
-            segmentId = segmentation.GetNthSegmentID(i)
-            displayNode.SetSegmentVisibility(segmentId, self._allSegmentVisibleState)
-            btn = self.segmentsTableWidget.cellWidget(i, 0)
-            if btn:
-                btn.setIcon(icon)
-                btn.setProperty("segmentVisible", self._allSegmentVisibleState)
+    def _hasExistingResults(self, segmentationNode) -> bool:
+        ref = segmentationNode.GetNodeReferenceID("SkeletonFolder")
+        if not ref:
+            return False
+        shNode = slicer.mrmlScene.GetSubjectHierarchyNode()
+        itemId = int(ref)
+        return itemId != 0 and shNode.GetItemName(itemId) != ""
 
+    def onSkelError(self, errorMsg):
+        print(f"Error: {errorMsg} ")
+        # if self.isStopping:
+        #     return
+
+        # self._setApplyVisible(True)
+        # if isinstance(errorMsg, Exception):
+        #     errorMsg = str(errorMsg)
+        # self._reportError("Encountered error during inference :\n" + errorMsg, doTraceback=False)
+
+    # Segment picking
     def _startSegmentPicking(self, segmentationNode):
         self._stopSegmentPicking()
 
@@ -534,61 +510,6 @@ class Widget(qt.QWidget):
         self._pickingInteractor = None
         self._pickingObserverTag = None
         self._pickingSegmentationNode = None
-
-    def _populateSegmentsTable(self, segmentationNode):
-        segmentation = segmentationNode.GetSegmentation()
-        nSegments = segmentation.GetNumberOfSegments()
-
-        self.segmentsTableWidget.setRowCount(nSegments)
-
-        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
-        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
-        displayNode = segmentationNode.GetDisplayNode()
-
-        for i in range(nSegments):
-            segmentId = segmentation.GetNthSegmentID(i)
-            segment = segmentation.GetSegment(segmentId)
-            r, g, b = segment.GetColor()
-
-            # Visibility toggle
-            isVisible = displayNode.GetSegmentVisibility3D(segmentId)
-            visButton = qt.QPushButton()
-            visButton.setIcon(visIcon if isVisible else invisIcon)
-            visButton.setFlat(True)
-            visButton.setFixedSize(20, 20)
-            visButton.setIconSize(qt.QSize(16, 16))
-            visButton.setProperty("segmentId", segmentId)
-            visButton.setProperty("segmentVisible", isVisible)
-            visButton.connect("clicked()", lambda sid=segmentId, btn=visButton: self._onSegmentVisibilityToggled(sid, btn))
-            self.segmentsTableWidget.setCellWidget(i, 0, visButton)
-
-            # Color swatch
-            colorItem = qt.QTableWidgetItem()
-            colorItem.setBackground(qt.QColor(int(r*255), int(g*255), int(b*255)))
-            colorItem.setFlags(qt.Qt.ItemIsEnabled)
-            self.segmentsTableWidget.setItem(i, 1, colorItem)
-
-            # Segment name
-            self.segmentsTableWidget.setItem(i, 2, qt.QTableWidgetItem(segment.GetName()))
-       
-        colPos = self.segmentsTableWidget.columnViewportPosition(0)
-        colWidth = self.segmentsTableWidget.columnWidth(0)
-        self._segVisHeaderButton.move(colPos + (colWidth - 24) // 2, 2)        
-        self._segVisHeaderButton.setVisible(True)
-
-    def _onSegmentVisibilityToggled(self, segmentId, button):
-        segmentationNode = self.inputSelector.currentNode()
-        if not segmentationNode:
-            return
-
-        displayNode = segmentationNode.GetDisplayNode()
-        isVisible = not button.property("segmentVisible")
-        displayNode.SetSegmentVisibility(segmentId, isVisible)
-        button.setProperty("segmentVisible", isVisible)
-
-        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
-        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
-        button.setIcon(visIcon if isVisible else invisIcon)
 
     def _onPickClick(self, caller, event):
         if self._tooltipLabel:
@@ -672,87 +593,21 @@ class Widget(qt.QWidget):
 
         self._tooltipTimer.start(1000)
 
-    def _runVoxelSkeletonization(self, inputNode):
-        # Remove CL columns if they exist
-        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
-                   for c in range(self.segmentsTableWidget.columnCount)]
-        for colName in ["CL Points"]:
-            if colName in headers:
-                self.segmentsTableWidget.removeColumn(headers.index(colName))
-                headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
-                           for c in range(self.segmentsTableWidget.columnCount)]
-        self._clVisHeaderButton.setVisible(False)
-        self._allCenterlineVisibleState = True
-
-        labelmapNode = None
-
-        if self.unsegmentedRadio.isChecked():
-            volumeArray   = slicer.util.arrayFromVolume(inputNode)
-            referenceNode = inputNode
-            print(f"Using scalar volume: {inputNode.GetName()}")
-        else:
-            labelmapNode  = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
-            slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
-                inputNode, labelmapNode, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY
-            )
-
-        volumeArray   = slicer.util.arrayFromVolume(labelmapNode)
-        referenceNode = labelmapNode
-        print(f"Using segmentation: {inputNode.GetName()}")
-
-        self._ijkToRas = vtk.vtkMatrix4x4()
-        referenceNode.GetIJKToRASMatrix(self._ijkToRas)
-        segmentation = inputNode.GetSegmentation()
-
-        # extract spacing here, before creating the logic
-        voxelSpacing = [
-            np.linalg.norm([self._ijkToRas.GetElement(r, 0) for r in range(3)]),
-            np.linalg.norm([self._ijkToRas.GetElement(r, 1) for r in range(3)]),
-            np.linalg.norm([self._ijkToRas.GetElement(r, 2) for r in range(3)]),
-        ]
-
-         # --- Set up logic (same signal pattern as nnUNet) ---
-        self.skelLogic.progressInfo.connect(self.onProgressInfo)
-        self.skelLogic.errorOccurred.connect(self.onSkelError)
-        self.skelLogic.skelFinished.connect(
-            lambda *args: self.onSkelFinished()
-        )
-
-        self.skelLogic.progressUpdated.connect(self.onSkelProgress)
-        self._setButtonProgress(self.runSkelPushButton, 0, 1, "Skeletonizing...")
-        self.skelLogic.startSkeletonization(volumeArray, segmentation, self._ijkToRas, voxelSpacing)
-
-    def onSkelProgress(self, current, total):
-        self._setButtonProgress(self.runSkelPushButton, current, total, "Skeletonizing...")
-        
-
-    def onSkelFinished(self):
-        try:
-            self._skeletonsBySegment = self.skelLogic.loadResults(self._segmentationNode, self._ijkToRas)
-        except RuntimeError as e:
-            slicer.util.errorDisplay(str(e))
-            return
-        finally:
-            self._resetButton(self.runSkelPushButton, "▶︎ Run Skeletonization")
-
-        self._addCenterlineColumns()
-        self._populateFeatureColumns()
-
-
-    def onSkelError(self, errorMsg):
-        print(f"Error: {errorMsg} ")
-        # if self.isStopping:
-        #     return
-
-        # self._setApplyVisible(True)
-        # if isinstance(errorMsg, Exception):
-        #     errorMsg = str(errorMsg)
-        # self._reportError("Encountered error during inference :\n" + errorMsg, doTraceback=False)
-
-
-
     
-    # Buttons
+    # Buttons & UI Helpers
+    def onToggleBranchingPoints(self, checked: bool) -> None:
+        if not hasattr(self.vesselTable, '_skeletonsBySegment'):
+            return
+        
+        for segmentName in self.vesselTable._skeletonsBySegment:
+            bpNode = slicer.mrmlScene.GetFirstNodeByName(f"BP_{segmentName}")
+            if bpNode and bpNode.GetDisplayNode():
+                bpNode.GetDisplayNode().SetVisibility(checked)
+
+    def _setSectionState(self, collapsibleButton, enabled, collapsed):
+        collapsibleButton.setEnabled(enabled)
+        collapsibleButton.collapsed = collapsed
+
     def _setButtonProgress(self, button, value, maximum, text="Running..."):
         pct = int(value / maximum * 100) if maximum > 0 else 0
         button.setText(f"{text} {pct}%")
@@ -778,168 +633,7 @@ class Widget(qt.QWidget):
         button.setStyleSheet("")
         button.setEnabled(True)
 
-
-    # Table
-    def _addCenterlineColumns(self):
-        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
-
-        # Check if columns already exist
-        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text() 
-                   for c in range(self.segmentsTableWidget.columnCount)]
-
-        if "CL Points" not in headers:
-            clPtsCol = self.segmentsTableWidget.columnCount
-            self.segmentsTableWidget.insertColumn(clPtsCol)
-            self.segmentsTableWidget.setHorizontalHeaderItem(clPtsCol, qt.QTableWidgetItem("CL Points"))
-            self.segmentsTableWidget.setColumnWidth(clPtsCol, 110)
-        else:
-            clPtsCol = headers.index("CL Points")
-
-        segmentationNode = self.inputSelector.currentNode()
-        segmentation = segmentationNode.GetSegmentation()
-
-        for i in range(self.segmentsTableWidget.rowCount):
-            segmentId = segmentation.GetNthSegmentID(i)
-            segmentName = segmentation.GetSegment(segmentId).GetName()
-            skelNode = self._skeletonsBySegment.get(segmentName, {}).get("modelNode")
-            nPts = skelNode.GetPolyData().GetNumberOfPoints() if skelNode else 0
-
-            # Reuse existing button if column already existed
-            existingWidget = self.segmentsTableWidget.cellWidget(i, clPtsCol)
-            if existingWidget:
-                btn = existingWidget.findChild(qt.QPushButton)
-            else:
-                btn = None
-
-            if btn is None:
-                cellWidget = qt.QWidget()
-                cellLayout = qt.QHBoxLayout(cellWidget)
-                cellLayout.setContentsMargins(2, 0, 2, 0)
-
-                clVisBtn = qt.QPushButton()
-                clVisBtn.setIcon(visIcon)
-                clVisBtn.setFlat(True)
-                clVisBtn.setFixedSize(20, 20)
-                clVisBtn.setIconSize(qt.QSize(16, 16))
-                clVisBtn.setProperty("segmentName", segmentName)
-                clVisBtn.setProperty("clVisible", True)
-                clVisBtn.connect("clicked()", lambda btn=clVisBtn, name=segmentName: self._onCenterlineVisibilityToggled(name, btn))
-
-                ptsLabel = qt.QLabel(str(nPts))
-                cellLayout.addWidget(clVisBtn)
-                cellLayout.addWidget(ptsLabel)
-                cellLayout.addStretch()
-                self.segmentsTableWidget.setCellWidget(i, clPtsCol, cellWidget)
-            else:
-                # Just update the label
-                label = existingWidget.findChild(qt.QLabel)
-                if label:
-                    label.setText(str(nPts))
-
-        # Position header eye button over CL Points column
-        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
-                   for c in range(self.segmentsTableWidget.columnCount)]
-        clPtsCol = headers.index("CL Points")
-        colPos = self.segmentsTableWidget.columnViewportPosition(clPtsCol)
-        self._clVisHeaderButton.move(colPos + 2, 2)
-        self._clVisHeaderButton.setVisible(True)
-
-
-    def _onCenterlineVisibilityToggled(self, segmentName, button):
-        skelNode = self._skeletonsBySegment.get(segmentName, {}).get("modelNode")
-        if not skelNode:
-            return
-
-        isVisible = not button.property("clVisible")
-        skelNode.GetDisplayNode().SetVisibility(isVisible)
-        button.setProperty("clVisible", isVisible)
-
-        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
-        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
-        button.setIcon(visIcon if isVisible else invisIcon)
-
-    def _onToggleAllCenterlineVisibility(self):
-        self._allCenterlineVisibleState = not self._allCenterlineVisibleState
-        visIcon = qt.QIcon(":/Icons/Small/SlicerVisible.png")
-        invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
-        self._clVisHeaderButton.setIcon(visIcon if self._allCenterlineVisibleState else invisIcon)
-
-        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
-                   for c in range(self.segmentsTableWidget.columnCount)]
-        if "CL Points" not in headers:
-            return
-        clVisCol = headers.index("CL Points")
-
-        for i in range(self.segmentsTableWidget.rowCount):
-            cellWidget = self.segmentsTableWidget.cellWidget(i, clVisCol)
-            btn = cellWidget.findChild(qt.QPushButton) if cellWidget else None
-            if not btn:
-                continue
-            segmentName = btn.property("segmentName")
-            skelNode = self._skeletonsBySegment.get(segmentName, {}).get("modelNode")
-            if skelNode:
-                skelNode.GetDisplayNode().SetVisibility(self._allCenterlineVisibleState)
-            btn.setIcon(visIcon if self._allCenterlineVisibleState else invisIcon)
-            btn.setProperty("clVisible", self._allCenterlineVisibleState)
-
-    def _populateFeatureColumns(self):
-        # --- Remove existing metric columns ---
-        metricColNames = ["Length (mm)", "Tortuosity", "Mean Radius (mm)"]
-        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
-                for c in range(self.segmentsTableWidget.columnCount)]
-        for colName in metricColNames:
-            if colName in headers:
-                self.segmentsTableWidget.removeColumn(headers.index(colName))
-                headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
-                        for c in range(self.segmentsTableWidget.columnCount)]
-
-        # --- Add metric columns ---
-        for colName in metricColNames:
-            col = self.segmentsTableWidget.columnCount
-            self.segmentsTableWidget.insertColumn(col)
-            item = qt.QTableWidgetItem(colName)
-            font = item.font()
-            font.setPointSize(9)
-            item.setFont(font)
-            self.segmentsTableWidget.setHorizontalHeaderItem(col, item)
-            self.segmentsTableWidget.horizontalHeader().setSectionResizeMode(col, qt.QHeaderView.Stretch)
-
-        # --- Populate values ---
-        headers = [self.segmentsTableWidget.horizontalHeaderItem(c).text()
-                for c in range(self.segmentsTableWidget.columnCount)]
-
-        metricToHeader = {
-            "length":      "Length (mm)",
-            "tortuosity":  "Tortuosity",
-            "mean_radius": "Mean Radius (mm)",
-        }
-
-        for i in range(self.segmentsTableWidget.rowCount):
-            segmentation = self._segmentationNode.GetSegmentation()
-            segmentId    = segmentation.GetNthSegmentID(i)
-            segmentName  = segmentation.GetSegment(segmentId).GetName()
-
-            data     = self._skeletonsBySegment.get(segmentName, {})
-            features = data.get("features", {}) if isinstance(data, dict) else {}
-
-            for featureKey, headerName in metricToHeader.items():
-                if headerName not in headers:
-                    continue
-                col   = headers.index(headerName)
-                value = features.get(featureKey, "N/A")
-                text  = f"{value:.3f}" if isinstance(value, float) else str(value)
-                self.segmentsTableWidget.setItem(i, col, qt.QTableWidgetItem(text))
-
-    def _repositionCLHeaderButton(self, *args):
-        if not self._clVisHeaderButton.isVisible():
-            return
-        for c in range(self.segmentsTableWidget.columnCount):
-            item = self.segmentsTableWidget.horizontalHeaderItem(c)
-            if item and item.text() == "CL Points":
-                colPos = self.segmentsTableWidget.columnViewportPosition(c)
-                self._clVisHeaderButton.move(colPos + 2, 2)
-                return
-            
+    # Progress and Logging
     def onProgressInfo(self, infoMsg):
         print(infoMsg)
         # self.ui.logTextEdit.insertPlainText(self._formatMsg(infoMsg) + "\n")

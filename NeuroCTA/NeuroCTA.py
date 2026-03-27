@@ -147,7 +147,7 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
         except ImportError:
             slicer.util.pip_install("skan")
             import skan
-            
+
         ScriptedLoadableModuleWidget.setup(self)
         widget = Widget()
         self.logic = widget.logic
@@ -156,7 +156,21 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
 
 
     def onReload(self):
-        pass
+        import imp
+
+        packageName = "SlicerNeuroCTALib"
+        submoduleNames = ["Signal", "Parameter", "InstallLogic", "Logic", "VesselTableManager", "Widget"]
+        f, filename, description = imp.find_module(packageName)
+        package = imp.load_module(packageName, f, filename, description)
+        for submoduleName in submoduleNames:
+            print(f"Reloading {packageName}.{submoduleName}")
+            f, filename, description = imp.find_module(submoduleName, package.__path__)
+            try:
+                imp.load_module(packageName + '.' + submoduleName, f, filename, description)
+            finally:
+                f.close()
+
+        ScriptedLoadableModuleWidget.onReload(self)
 
     # def __init__(self, parent=None) -> None:
     #     """Called when the user opens the module the first time and the widget is initialized."""

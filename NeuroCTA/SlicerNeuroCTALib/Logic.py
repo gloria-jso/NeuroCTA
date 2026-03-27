@@ -451,21 +451,10 @@ class SkeletonizationLogic:
 
         self._startSkelProcess()
 
-    def loadResults(
-        self,
-        segmentation: "slicer.vtkSegmentation",
-        ijkToRas: "vtk.vtkMatrix4x4"
-    ) -> dict:
-        """
-        Called after finished signal fires.
-        Reads worker output and creates vtkMRMLModelNodes.
-        Returns dict of {segmentName: modelNode}.
-        """
+    def loadResults(self, segmentationNode, ijkToRas):
         output_path = Path(self._tmpDir.path()) / "results.json"
         if not output_path.exists():
-            raise RuntimeError(
-                "Worker output not found. Check logs for errors."
-            )
+            raise RuntimeError("Worker output not found. Check logs for errors.")
 
         with open(output_path) as f:
             results = json.load(f)
@@ -475,19 +464,38 @@ class SkeletonizationLogic:
             for r in range(4)
         ])
 
+        shNode = slicer.mrmlScene.GetSubjectHierarchyNode()
+
+        # --- Clean up old folder if exists ---
+        existingRef = segmentationNode.GetNodeReferenceID("SkeletonFolder")
+        if existingRef:
+            existingItem = shNode.GetItemByUID(slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyUIDByName("SkeletonFolder"), existingRef)
+            oldItem = int(existingRef) if existingRef.isdigit() else 0
+            if oldItem and shNode.GetItem(oldItem):
+                shNode.RemoveItem(oldItem)
+
+        # --- Create fresh folder hierarchy ---
+        segNodeName = segmentationNode.GetName()
+        rootFolderItemId = shNode.CreateFolderItem(
+            shNode.GetSceneItemID(), f"{segNodeName}"
+        )
+        segmentationNode.AddNodeReferenceID("SkeletonFolder", str(rootFolderItemId))
+
+        skelFolder = shNode.CreateFolderItem(rootFolderItemId, "Skeletons")
+        bpFolder   = shNode.CreateFolderItem(rootFolderItemId, "Branch Points")
+
         skeletonsBySegment = {}
 
         for segmentName, data in results.items():
-            coords = np.array(data["coords"])   # (N, 3) IJK
+            coords = np.array(data["coords"])
             r, g, b = data["color"]
 
             if len(coords) == 0:
                 continue
 
             # IJK -> RAS
-            ijk_h  = np.column_stack([coords[:, 2], coords[:, 1], coords[:, 0], np.ones(len(coords))])
-            ras_h  = (m @ ijk_h.T).T
-            ras_pts = ras_h[:, :3]
+            ijk_h   = np.column_stack([coords[:, 2], coords[:, 1], coords[:, 0], np.ones(len(coords))])
+            ras_pts = (m @ ijk_h.T).T[:, :3]
 
             # Build polydata
             points = vtk.vtkPoints()
@@ -505,16 +513,15 @@ class SkeletonizationLogic:
             polyData.SetPoints(points)
             polyData.SetVerts(verts)
 
-            # Create / replace model node — safe, we're back on main thread
+            # Remove old skeleton node if exists
             existing = slicer.mrmlScene.GetFirstNodeByName(f"Skeleton_{segmentName}")
             if existing:
                 slicer.mrmlScene.RemoveNode(existing)
 
-            modelNode = slicer.mrmlScene.AddNewNodeByClass(
-                "vtkMRMLModelNode", f"Skeleton_{segmentName}"
-            )
+            modelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"Skeleton_{segmentName}")
             modelNode.SetAndObserveMesh(polyData)
             modelNode.CreateDefaultDisplayNodes()
+            shNode.SetItemParent(shNode.GetItemByDataNode(modelNode), skelFolder)
 
             displayNode = modelNode.GetDisplayNode()
             displayNode.SetColor(r, g, b)
@@ -527,29 +534,29 @@ class SkeletonizationLogic:
                 "features":  data.get("features", {})
             }
 
-            # Add branch points
+            # --- Branch points ---
             bp_coords = data.get("features", {}).get("branch_point_coords", [])
             if bp_coords:
                 bp_coords = np.array(bp_coords)
-
-                # IJK -> RAS
-                ijk_h  = np.column_stack([bp_coords[:, 2], bp_coords[:, 1], bp_coords[:, 0], np.ones(len(bp_coords))])
+                ijk_h   = np.column_stack([bp_coords[:, 2], bp_coords[:, 1], bp_coords[:, 0], np.ones(len(bp_coords))])
                 ras_pts = (m @ ijk_h.T).T[:, :3]
 
-                existing = slicer.mrmlScene.GetFirstNodeByName(f"BranchPoints_{segmentName}")
+                existing = slicer.mrmlScene.GetFirstNodeByName(f"BP_{segmentName}")
                 if existing:
                     slicer.mrmlScene.RemoveNode(existing)
 
-                bpNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"BranchPoints_{segmentName}")
+                bpNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"BP_{segmentName}")
                 bpNode.CreateDefaultDisplayNodes()
                 bpNode.GetDisplayNode().SetGlyphScale(1.0)
                 bpNode.GetDisplayNode().SetSelectedColor(r, g, b)
                 bpNode.GetDisplayNode().SetColor(r, g, b)
+                shNode.SetItemParent(shNode.GetItemByDataNode(bpNode), bpFolder)
 
                 for pt in ras_pts:
                     bpNode.AddControlPoint(vtk.vtkVector3d(pt[0], pt[1], pt[2]))
 
         return skeletonsBySegment
+    
 
     # ── Private ────────────────────────────────────────────────────────────────
 
