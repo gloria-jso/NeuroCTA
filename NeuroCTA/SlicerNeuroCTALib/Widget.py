@@ -11,9 +11,10 @@ import numpy as np
 
 from .InstallLogic import InstallLogic, InstallLogicProtocol
 from .Parameter import Parameter
-from .Logic import Logic, LogicProtocol, SkeletonizationLogic
+from .Logic import Logic, LogicProtocol, SkeletonizationLogic, ClassificationLogic
 from .Signal import Signal
 from .VesselTableManager import VesselTableManager
+from .VesselGNN import VesselGNN, VesselSAGE
 
 import time
 
@@ -40,6 +41,7 @@ class Widget(qt.QWidget):
 
         self.logic = logic or Logic()
         self.skelLogic = skeletonizationLogic or SkeletonizationLogic()
+        self.classLogic = ClassificationLogic()
         self.vesselTable = VesselTableManager()
 
 
@@ -148,6 +150,44 @@ class Widget(qt.QWidget):
         segmentationFormLayout.addItem(qt.QSpacerItem(0, 5))
         self.runSegPushButton = qt.QPushButton("▶︎ Run Segmentation")
         segmentationFormLayout.addRow("", self.runSegPushButton)
+
+
+        # ─────────────────── Vessel Classification  ────────────────────────
+        self.classCollapsibleButton = ctk.ctkCollapsibleButton()
+        self.classCollapsibleButton.setStyleSheet("""
+            ctkCollapsibleButton {
+                background-color: #d9dbd9;  /* background color */
+                border: 1px solid gray;
+                border-radius: 4px;
+            }
+        """)
+        self.classCollapsibleButton.text = "Vessel Classification"
+        self.classCollapsibleButton.collapsed = True
+        layout.addWidget(self.classCollapsibleButton)
+
+        classificationFormLayout = qt.QFormLayout(self.classCollapsibleButton)
+        classificationFormLayout.setContentsMargins(12,12,12,12)
+
+        # Vessel classification
+        self.classOptionsGroupBox = qt.QGroupBox()
+        self.classOptionsGroupBox.setStyleSheet("QGroupBox { margin-left: 18px; }")
+        self.classOptionsLayout = qt.QFormLayout(self.classOptionsGroupBox)
+        self.classModelPathLabel = qt.QLabel("Model path:")
+        self.classModelPathEdit = ctk.ctkPathLineEdit()
+        self.classModelPathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Models/Graph_Neural_Network/best_model_sage_fold1.pt")
+
+        self.classOptionsLayout.addRow(self.classModelPathLabel, self.classModelPathEdit)
+        classificationFormLayout.addWidget(self.classOptionsGroupBox)
+
+        self.segFilePathEdit = ctk.ctkPathLineEdit()
+        self.segFilePathEdit.filters = ctk.ctkPathLineEdit.Files
+        self.segFilePathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Data/TopBrainData/topcow_ct_024.nii.gz")
+        classificationFormLayout.addRow("Segmentation file:", self.segFilePathEdit)
+
+        classificationFormLayout.addItem(qt.QSpacerItem(0, 5))
+        self.runInferenceButton = qt.QPushButton("Run Vessel Classification")
+        classificationFormLayout.addWidget(self.runInferenceButton)
+        self.runInferenceButton.connect('clicked()', self.onRunClassInference)
 
 
         # ─────────────────── Skeletonization collapsible ───────────────────────
@@ -264,7 +304,7 @@ class Widget(qt.QWidget):
         """Update the input selector label based on the selected input type."""
 
         if self.unsegmentedRadio.isChecked():  # Unsegmented Volume
-            self._stopSegmentPicking()
+            # self._stopSegmentPicking()
             self.inputSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
             self.inputLabel.setText("Input volume:")
             self._setSectionState(self.segCollapsibleButton,   enabled=True,  collapsed=False)
@@ -323,7 +363,7 @@ class Widget(qt.QWidget):
             self.vesselTable.setVisible(True)
 
             # Start ray cast picking
-            self._startSegmentPicking(node)
+            # self._startSegmentPicking(node)
 
         # Reset 3D view
         layoutManager = slicer.app.layoutManager()
@@ -382,6 +422,113 @@ class Widget(qt.QWidget):
             self.getCurrentVolumeNode(),
             parameter=self._parameterNode.params
         )
+
+    # Classification
+
+    def onRunClassInference(self):
+        inputNode = self.inputSelector.currentNode()
+
+        if inputNode is None:
+            slicer.util.errorDisplay("No input selected.")
+            return
+        
+        # load model lazily on first run
+        if self.classLogic.model is None:
+            path = self.classModelPathEdit.currentPath
+            if not path:
+                slicer.util.errorDisplay("No model path set.")
+                return
+            try:
+                self.classLogic.loadModel(
+                    path,
+                    # VesselGNN(in_channels=5, edge_dim=6, hidden_channels=128,
+                    #         num_classes=40, n_layers=4, dropout=0.3)
+                    VesselSAGE(in_channels=4, hidden_channels=128,num_classes=40, n_layers=4, dropout=0.3)
+                )
+            except Exception as e:
+                slicer.util.errorDisplay(f"Failed to load model: {e}")
+                return
+
+        # reload if path changed
+        elif self.classModelPathEdit.currentPath != self.classLogic.loadedModelPath:
+            self.classLogic.loadModel(...)
+        
+        # load directly from file — bypasses Slicer's export geometry issues
+        segFilePath = self.segFilePathEdit.currentPath
+        if not segFilePath:
+            slicer.util.errorDisplay("Please set segmentation file path.")
+            return
+
+        try:
+            seg_vol, affine, zooms = self.classLogic.loadVolume(segFilePath)
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to load file: {e}")
+            return
+
+        binary_mask  = (seg_vol > 0).astype(np.uint8)
+        voxelSpacing = [float(zooms[2]), float(zooms[1]), float(zooms[0])]
+
+        print("Shape:", binary_mask.shape)
+        print("Zooms:", zooms)
+        print("Spacing passed to inference:", voxelSpacing)
+        print("Affine:\n", affine)
+
+        ras_coords, preds = self.classLogic.runClassInference(
+            binary_mask, None, voxelSpacing, affine
+        )
+        self._displayClassificationResults(ras_coords, preds)
+
+    def _displayClassificationResults(self, ras_coords, preds):
+        idx_to_label = {v: k for k, v in self.classLogic.LABEL_TO_IDX.items()}
+
+        # fixed colormap — index matches LABEL_TO_IDX (0-indexed, label 1 = idx 0)
+        COLORS = [
+            (255,  0,182), (  0,159,255), (154, 77, 66), (  0,255,190),
+            (120, 63,193), ( 31,150,152), (255,172,253), (177,204,113),
+            (241,  8, 92), (254,143, 66), (221,  0,255), ( 77, 62,  2),
+            (255,  0,  0), (  0,255,  0), (  2,173, 36), (  0,  0,255),
+            (255,255,  0), (  0,255,255), (255,  0,255), (255,239,213),
+            (  0,  0,205), (205,133, 63), (210,180,140), (102,205,170),
+            (  0,  0,128), (  0,139,139), ( 46,139, 87), (255,228,225),
+            (106, 90,205), (221,160,221), (233,150,122), (165, 42, 42),
+            (255,250,250), (147,112,219), (218,112,214), ( 75,  0,130),
+            (255,182,193), ( 60,179,113), (255,235,205), (255,228,196),
+        ]
+        # normalize to 0-1
+        colors = {i: tuple(c/255.0 for c in COLORS[i]) for i in range(len(COLORS))}
+
+        shNode     = slicer.mrmlScene.GetSubjectHierarchyNode()
+        rootFolder = shNode.CreateFolderItem(shNode.GetSceneItemID(), "Classification")
+
+        for idx in np.unique(preds):
+            if idx < 0:
+                continue
+            mask      = preds == idx
+            name      = idx_to_label.get(idx, f"cls_{idx}")
+            class_pts = ras_coords[mask]
+            color     = colors.get(idx, (1.0, 1.0, 1.0))
+
+            pts   = vtk.vtkPoints()
+            cells = vtk.vtkCellArray()
+            for i, pt in enumerate(class_pts):
+                pts.InsertNextPoint(*pt.tolist())
+                cells.InsertNextCell(1)
+                cells.InsertCellPoint(i)
+
+            pd = vtk.vtkPolyData()
+            pd.SetPoints(pts)
+            pd.SetVerts(cells)
+
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"Class_{name}")
+            node.SetAndObserveMesh(pd)
+            node.CreateDefaultDisplayNodes()
+            dn = node.GetDisplayNode()
+            dn.SetColor(*color)
+            dn.SetPointSize(5)
+            dn.SetVisibility(True)
+            shNode.SetItemParent(shNode.GetItemByDataNode(node), rootFolder)
+
+        slicer.app.layoutManager().threeDWidget(0).threeDView().resetFocalPoint()
 
     # Skeletonization
     def onSkelMethodChanged(self, button) -> None:

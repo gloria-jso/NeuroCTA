@@ -15,8 +15,6 @@ import time
 from ExtractCenterline import ExtractCenterlineLogic
 from skimage.morphology import skeletonize
 
-
-
 class LogicProtocol(Protocol):
     """
     Segmentation interface class.
@@ -605,3 +603,243 @@ class SkeletonizationLogic:
             [str(worker_path), json.dumps(args_dict)],
             qt.QProcess.Unbuffered | qt.QProcess.ReadOnly
         )
+
+
+# Classification Logic
+import torch
+import numpy as np
+import nibabel as nib
+from skimage.morphology import skeletonize
+from skan import Skeleton, summarize
+from scipy.ndimage import distance_transform_edt
+
+class ClassificationLogic:
+    def __init__(self):
+        self.model = None
+        self.device = torch.device("cpu")
+        self.LABEL_MAP = {
+            0: "background", 1: "BA", 2: "R-P1P2", 3: "L-P1P2",
+            4: "R-ICA", 5: "R-M1", 6: "L-ICA", 7: "L-M1",
+            8: "R-Pcom", 9: "L-Pcom", 10: "Acom", 11: "R-A1A2",
+            12: "L-A1A2", 13: "R-A3", 14: "L-A3", 15: "3rd-A2",
+            16: "3rd-A3", 17: "R-M2", 18: "R-M3", 19: "L-M2",
+            20: "L-M3", 21: "R-P3P4", 22: "L-P3P4", 23: "R-VA",
+            24: "L-VA", 25: "R-SCA", 26: "L-SCA", 27: "R-AICA",
+            28: "L-AICA", 29: "R-PICA", 30: "L-PICA", 31: "R-AChA",
+            32: "L-AChA", 33: "R-OA", 34: "L-OA", 35: "VoG",
+            36: "StS", 37: "ICVs", 38: "R-BVR", 39: "L-BVR", 40: "SSS"
+        }
+        self.loadedModelPath = None
+
+        # exclude background
+        self.ARTERY_NAMES = [v for k, v in self.LABEL_MAP.items() if k > 0]
+        self.LABEL_TO_IDX = {name: i for i, name in enumerate(self.ARTERY_NAMES)}
+        self.NUM_CLASSES   = len(self.ARTERY_NAMES)
+
+    def loadModel(self, modelPath, modelInstance):
+        modelInstance.load_state_dict(
+            torch.load(modelPath, map_location=self.device, weights_only=False)
+        )
+        self.model = modelInstance
+        self.model.eval()
+        self.loadedModelPath = modelPath
+
+    def runClassInference(self, binary_mask, _, voxel_spacing, affine):
+        # import torch
+        # import numpy as np
+        # from skimage.morphology import skeletonize
+        # from skan import Skeleton, summarize
+        # from scipy.ndimage import distance_transform_edt
+        # import nibabel as nib
+
+        # ── Skeleton + distance map ───────────────────────────────────────────────
+        skel = skeletonize(binary_mask)
+
+        dist = distance_transform_edt(
+            binary_mask,
+            sampling=voxel_spacing  # IMPORTANT: spacing applied here
+        )
+
+        skel_obj = Skeleton(skel, spacing=voxel_spacing)
+        stats = summarize(skel_obj, separator='-')
+
+        coords = skel_obj.coordinates          # (N, 3) in voxel space (ZYX)
+        degrees = skel_obj.degrees
+
+
+        # ── Node features ─────────────────────────────────────────────────────────
+        shape = np.array(binary_mask.shape, dtype=float)
+        norm_coords = coords / shape
+
+        node_feats = np.column_stack([norm_coords, degrees])
+
+        # ── Edge features ─────────────────────────────────────────────────────────
+        edge_src, edge_dst, edge_feats = [], [], []
+
+        for row_idx, row in stats.iterrows():
+            src = int(row["node-id-src"])
+            dst = int(row["node-id-dst"])
+
+            path = skel_obj.path_coordinates(int(row_idx)).astype(int)
+
+            radii = dist[path[:, 0], path[:, 1], path[:, 2]]
+
+            euc = max(float(row["euclidean-distance"]), 1e-6)
+
+            feats = [
+                float(row["branch-distance"]),
+                float(row["branch-distance"]) / euc,
+                float(radii.mean()),
+                float(radii.min()),
+                float(radii.max()),
+                float(radii.std()),
+            ]
+
+            # undirected graph (duplicate edges)
+            edge_src.append(src)
+            edge_dst.append(dst)
+            edge_src.append(dst)
+            edge_dst.append(src)
+
+            edge_feats.append(feats)
+            edge_feats.append(feats)
+
+        x = torch.tensor(node_feats, dtype=torch.float)
+        edge_index = torch.tensor([edge_src, edge_dst], dtype=torch.long)
+
+        print(f"[Slicer] Graph: {x.shape[0]} nodes, {len(edge_src)//2} edges")
+
+        torch.save({
+            "x": x,
+            "edge_index": edge_index
+        }, "/Users/gloriaso/Desktop/BME499/NeuroCTA/NeuroCTA/SlicerNeuroCTALib/debug_graph.pt")
+
+        # ── Inference ─────────────────────────────────────────────────────────────
+        model = self.model
+        model.eval()
+
+        with torch.no_grad():
+            out = model(x, edge_index)
+            preds = out.argmax(dim=1).cpu().numpy()
+
+        # ── Convert to RAS ─────────────────────────────────────────────────────────
+        # coords are ZYX → convert to XYZ before affine
+        ras_coords = nib.affines.apply_affine(affine, coords)  
+
+        print("Skel points:", coords.shape)
+        print("Coords min:", coords.min(axis=0))
+        print("Coords max:", coords.max(axis=0))
+        print("RAS coords min:", ras_coords.min(axis=0))
+        print("RAS coords max:", ras_coords.max(axis=0))
+
+        return ras_coords, preds
+
+    def voxelToRAS(self, norm_coords, affine, shape):
+        vox_coords = norm_coords * (shape - 1)      # denormalize
+        vox_xyz    = vox_coords[:, ::-1]            # ZYX -> XYZ
+        return nib.affines.apply_affine(affine, vox_xyz)
+        
+    
+    def _build_graph(self, binary_mask, label_vol, voxel_spacing):
+        skel    = skeletonize(binary_mask.astype(np.uint8))
+        dist    = distance_transform_edt(binary_mask, sampling=voxel_spacing)
+        skel_obj = Skeleton(skel, spacing=voxel_spacing)
+        stats   = summarize(skel_obj, separator='-')
+
+        # ── Node features ────────────────────────────────────────────────────────
+        coords  = skel_obj.coordinates                        # (N, 3)
+        degrees = skel_obj.degrees                            # (N,)
+
+        # normalise position to [0,1] within volume
+        shape = np.array(binary_mask.shape, dtype=float)
+        norm_coords = coords / shape
+
+        node_feats = np.column_stack([norm_coords, degrees])  # (N, 4)
+
+        # ── Node labels ──────────────────────────────────────────────────────────
+        node_labels = np.array([
+            self._assign_node_label(coords[i], label_vol)
+            for i in range(len(coords))
+        ])
+
+        # ── Edges ────────────────────────────────────────────────────────────────
+        edge_src, edge_dst, edge_feats = [], [], []
+
+        for row_idx, row in stats.iterrows():
+            src = int(row["node-id-src"])
+            dst = int(row["node-id-dst"])
+
+            path = skel_obj.path_coordinates(int(row_idx)).astype(int)
+            radii = dist[path[:, 0], path[:, 1], path[:, 2]]
+            euc   = max(float(row["euclidean-distance"]), 1e-6)
+
+            edge_src.append(src);  edge_dst.append(dst)
+            edge_src.append(dst);  edge_dst.append(src)  # undirected
+
+            feats = [
+                float(row["branch-distance"]),
+                float(row["branch-distance"]) / euc,  # tortuosity
+                float(radii.mean()),
+                float(radii.min()),
+                float(radii.max()),
+                float(radii.std()),
+            ]
+            edge_feats.append(feats)
+            edge_feats.append(feats)  # both directions
+
+        edge_index = torch.tensor([edge_src, edge_dst], dtype=torch.long)
+        edge_attr  = torch.tensor(edge_feats, dtype=torch.float)
+
+        return Data(
+            x          = torch.tensor(node_feats,   dtype=torch.float),
+            edge_index = edge_index,
+            edge_attr  = edge_attr,
+            y          = torch.tensor(node_labels,  dtype=torch.long),
+            num_nodes  = len(coords),
+        )
+
+    def _assign_node_label(self, coord, label_vol):
+        """
+        Assign artery label to a node by majority vote
+        in a small neighbourhood around the coordinate.
+        """
+        r = 2  # neighbourhood radius in voxels
+        z, y, x = [int(c) for c in coord]
+        patch = label_vol[
+            max(0, z-r):z+r+1,
+            max(0, y-r):y+r+1,
+            max(0, x-r):x+r+1
+        ]
+        vals, counts = np.unique(patch[patch > 0], return_counts=True)
+        if len(vals) == 0:
+            return -1  # background node, will be masked in training
+        return self.LABEL_TO_IDX.get(self.LABEL_MAP.get(int(vals[counts.argmax()]), ""), -1)
+    
+
+    def loadVolume(self, path):
+        import nibabel as nib
+        path = Path(path)
+
+        if path.suffix in [".nii", ".gz"] or str(path).endswith(".nii.gz"):
+            nii    = nib.load(str(path))
+            data   = nii.get_fdata().astype(np.uint8)
+            affine = nii.affine
+            zooms  = nii.header.get_zooms()
+
+        elif path.suffix == ".nrrd":
+            import nrrd
+            data, header = nrrd.read(str(path))
+            data = data.astype(np.uint8)
+            if "space directions" in header:
+                zooms = [np.linalg.norm(v) for v in header["space directions"]]
+            else:
+                zooms = [1.0, 1.0, 1.0]
+            affine = np.eye(4)
+            affine[:3, :3] = np.diag(zooms)
+
+        else:
+            raise ValueError(f"Unsupported file format: {path.suffix}")
+
+        return data, affine, zooms
+
+

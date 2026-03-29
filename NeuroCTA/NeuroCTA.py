@@ -148,6 +148,17 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
             slicer.util.pip_install("skan")
             import skan
 
+        try:
+            import torch_geometric
+        except ImportError:
+            slicer.util.pip_install("torch_geometric")
+
+        try:
+            import nrrd
+        except ImportError:
+            slicer.util.pip_install("pynrrd")
+
+
         ScriptedLoadableModuleWidget.setup(self)
         widget = Widget()
         self.logic = widget.logic

@@ -4,3 +4,4 @@ from .Logic import Logic
 from .VesselTableManager import VesselTableManager
 from .Widget import Widget
 from .Signal import Signal
+from .VesselGNN import VesselGNN

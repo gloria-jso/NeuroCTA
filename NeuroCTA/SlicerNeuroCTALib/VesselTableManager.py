@@ -67,7 +67,6 @@ class VesselTableManager(qt.QTableWidget):
         invisIcon = qt.QIcon(":/Icons/Small/SlicerInvisible.png")
         displayNode = segmentationNode.GetDisplayNode()
 
-        print(f"there are {nSegments} segments")
         for i in range(nSegments):
             segmentId = segmentation.GetNthSegmentID(i)
             segment = segmentation.GetSegment(segmentId)
