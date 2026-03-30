@@ -1,5 +1,6 @@
 import qt
 import slicer
+import vtk
 
 class VesselTableManager(qt.QTableWidget):
     def __init__(self):
@@ -97,6 +98,7 @@ class VesselTableManager(qt.QTableWidget):
         colWidth = self.columnWidth(0)
         self._segVisHeaderButton.move(colPos + (colWidth - 24) // 2, 2)        
         self._segVisHeaderButton.setVisible(True)
+        self._syncToSlicerTableNode()
 
     def populateFeatureColumns(self):
         # --- Remove existing metric columns ---
@@ -145,7 +147,7 @@ class VesselTableManager(qt.QTableWidget):
                 value = features.get(featureKey, "N/A")
                 text  = f"{value:.3f}" if isinstance(value, float) else str(value)
                 self.setItem(i, col, qt.QTableWidgetItem(text))
-
+        self._syncToSlicerTableNode()
 
 
     def setSkeletons(self, skeletonsBySegment) -> None:
@@ -282,6 +284,7 @@ class VesselTableManager(qt.QTableWidget):
         colPos = self.columnViewportPosition(clPtsCol)
         self._clVisHeaderButton.move(colPos + 2, 2)
         self._clVisHeaderButton.setVisible(True)
+        self._syncToSlicerTableNode()
 
     def removeCLColumns(self):
         headers = [self.horizontalHeaderItem(c).text()
@@ -293,6 +296,7 @@ class VesselTableManager(qt.QTableWidget):
                            for c in range(self.columnCount)]
         self._clVisHeaderButton.setVisible(False)
         self._allCenterlineVisibleState = True
+        self._syncToSlicerTableNode()
 
 
     def _onCenterlineVisibilityToggled(self, segmentName, button):
@@ -341,3 +345,104 @@ class VesselTableManager(qt.QTableWidget):
                 colPos = self.columnViewportPosition(c)
                 self._clVisHeaderButton.move(colPos + 2, 2)
                 return
+            
+    def export(self):
+        import csv
+
+        filePath = qt.QFileDialog.getSaveFileName(
+            self, "Export Table", "", "CSV Files (*.csv);;All Files (*)"
+        )
+        if not filePath:
+            return
+        if not filePath.endswith(".csv"):
+            filePath += ".csv"
+
+        with open(filePath, "w", newline="") as f:
+            writer = csv.writer(f)
+
+            # --- Build header list, skipping vis/color cols (headers "" or " ") ---
+            headers = []
+            for col in range(self.columnCount):
+                item = self.horizontalHeaderItem(col)
+                headers.append(item.text() if item else "")
+            exportCols = [c for c in range(self.columnCount)
+                        if headers[c] not in ("", " ")]
+            writer.writerow([headers[c] for c in exportCols])
+
+            # --- Write data rows ---
+            skeletons = getattr(self, "_skeletonsBySegment", {})
+            segmentation = self._segmentationNode.GetSegmentation() if self._segmentationNode else None
+
+            for row in range(self.rowCount):
+                # Get segment name for this row (used as fallback for widget cells)
+                segmentName = ""
+                if segmentation:
+                    segmentId = segmentation.GetNthSegmentID(row)
+                    segmentName = segmentation.GetSegment(segmentId).GetName()
+
+                rowData = []
+                for col in exportCols:
+                    item = self.item(row, col)
+                    if item is not None:
+                        rowData.append(item.text())
+                    else:
+                        # Widget cell — derive value from source data instead of parsing the widget
+                        colName = headers[col]
+                        if colName == "CL Points" and segmentName:
+                            skelNode = skeletons.get(segmentName, {}).get("modelNode")
+                            nPts = skelNode.GetPolyData().GetNumberOfPoints() if skelNode else 0
+                            rowData.append(str(nPts))
+                        else:
+                            rowData.append("")
+                writer.writerow(rowData)
+
+        qt.QMessageBox.information(self, "Export Complete", f"Table exported to:\n{filePath}")
+
+    def _syncToSlicerTableNode(self):
+        skeletons = getattr(self, "_skeletonsBySegment", {})
+        segmentation = self._segmentationNode.GetSegmentation() if self._segmentationNode else None
+        if not segmentation:
+            return
+
+        # Always recreate for a clean slate
+        tableNode = slicer.mrmlScene.GetFirstNodeByName("VesselMetrics")
+        if tableNode:
+            slicer.mrmlScene.RemoveNode(tableNode)
+        tableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "VesselMetrics")
+
+        # --- Build exportable column list ---
+        headers = []
+        for col in range(self.columnCount):
+            item = self.horizontalHeaderItem(col)
+            headers.append(item.text() if item else "")
+        exportCols = [c for c in range(self.columnCount)
+                    if headers[c] not in ("", " ")]
+
+        # --- Create vtk columns ---
+        for col in exportCols:
+            arr = vtk.vtkStringArray()
+            arr.SetName(headers[col])
+            tableNode.AddColumn(arr)
+
+        # --- Fill rows ---
+        table = tableNode.GetTable()
+        for row in range(self.rowCount):
+            segmentId = segmentation.GetNthSegmentID(row)
+            segmentName = segmentation.GetSegment(segmentId).GetName()
+            table.InsertNextBlankRow()
+
+            for i, col in enumerate(exportCols):
+                item = self.item(row, col)
+                if item is not None:
+                    value = item.text()
+                else:
+                    colName = headers[col]
+                    if colName == "CL Points" and segmentName:
+                        skelNode = skeletons.get(segmentName, {}).get("modelNode")
+                        nPts = skelNode.GetPolyData().GetNumberOfPoints() if skelNode else 0
+                        value = str(nPts)
+                    else:
+                        value = ""
+                table.GetColumn(i).SetValue(row, value)
+
+        table.Modified()

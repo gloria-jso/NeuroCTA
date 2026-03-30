@@ -634,7 +634,7 @@ class ClassificationLogic:
         # exclude background
         self.ARTERY_NAMES = [v for k, v in self.LABEL_MAP.items() if k > 0]
         self.LABEL_TO_IDX = {name: i for i, name in enumerate(self.ARTERY_NAMES)}
-        self.NUM_CLASSES   = len(self.ARTERY_NAMES)
+        self.NUM_CLASSES = len(self.ARTERY_NAMES)
 
     def loadModel(self, modelPath, modelInstance):
         modelInstance.load_state_dict(
@@ -644,13 +644,7 @@ class ClassificationLogic:
         self.model.eval()
         self.loadedModelPath = modelPath
 
-    def runClassInference(self, binary_mask, _, voxel_spacing, affine):
-        # import torch
-        # import numpy as np
-        # from skimage.morphology import skeletonize
-        # from skan import Skeleton, summarize
-        # from scipy.ndimage import distance_transform_edt
-        # import nibabel as nib
+    def runClassInference(self, binary_mask, _, voxel_spacing, affine, modelType):
 
         # ── Skeleton + distance map ───────────────────────────────────────────────
         skel = skeletonize(binary_mask)
@@ -663,15 +657,17 @@ class ClassificationLogic:
         skel_obj = Skeleton(skel, spacing=voxel_spacing)
         stats = summarize(skel_obj, separator='-')
 
-        coords = skel_obj.coordinates          # (N, 3) in voxel space (ZYX)
+        coords = skel_obj.coordinates  
         degrees = skel_obj.degrees
-
 
         # ── Node features ─────────────────────────────────────────────────────────
         shape = np.array(binary_mask.shape, dtype=float)
         norm_coords = coords / shape
 
-        node_feats = np.column_stack([norm_coords, degrees])
+        node_radii = dist[coords[:, 0].astype(int), coords[:, 1].astype(int), coords[:, 2].astype(int)]
+        degrees_norm = degrees / (degrees.max() + 1e-6)
+
+        node_feats = np.column_stack([norm_coords, degrees_norm, node_radii])  # (N, 5)
 
         # ── Edge features ─────────────────────────────────────────────────────────
         edge_src, edge_dst, edge_feats = [], [], []
@@ -709,17 +705,22 @@ class ClassificationLogic:
 
         print(f"[Slicer] Graph: {x.shape[0]} nodes, {len(edge_src)//2} edges")
 
-        torch.save({
-            "x": x,
-            "edge_index": edge_index
-        }, "/Users/gloriaso/Desktop/BME499/NeuroCTA/NeuroCTA/SlicerNeuroCTALib/debug_graph.pt")
 
         # ── Inference ─────────────────────────────────────────────────────────────
         model = self.model
         model.eval()
 
         with torch.no_grad():
-            out = model(x, edge_index)
+            if modelType == "SAGE":
+                out = model(x, edge_index)
+            else:
+                edge_attr = np.array(edge_feats, dtype=np.float32)
+                mean = edge_attr.mean(axis=0)
+                std = edge_attr.std(axis=0) + 1e-6
+                edge_attr = torch.tensor((edge_attr - mean) / std, dtype=torch.float)
+                
+                out = model(x, edge_index, edge_attr)
+
             preds = out.argmax(dim=1).cpu().numpy()
 
         # ── Convert to RAS ─────────────────────────────────────────────────────────
@@ -736,18 +737,18 @@ class ClassificationLogic:
 
     def voxelToRAS(self, norm_coords, affine, shape):
         vox_coords = norm_coords * (shape - 1)      # denormalize
-        vox_xyz    = vox_coords[:, ::-1]            # ZYX -> XYZ
+        vox_xyz = vox_coords[:, ::-1]            # ZYX -> XYZ
         return nib.affines.apply_affine(affine, vox_xyz)
         
     
     def _build_graph(self, binary_mask, label_vol, voxel_spacing):
-        skel    = skeletonize(binary_mask.astype(np.uint8))
-        dist    = distance_transform_edt(binary_mask, sampling=voxel_spacing)
+        skel = skeletonize(binary_mask.astype(np.uint8))
+        dist = distance_transform_edt(binary_mask, sampling=voxel_spacing)
         skel_obj = Skeleton(skel, spacing=voxel_spacing)
-        stats   = summarize(skel_obj, separator='-')
+        stats = summarize(skel_obj, separator='-')
 
         # ── Node features ────────────────────────────────────────────────────────
-        coords  = skel_obj.coordinates                        # (N, 3)
+        coords = skel_obj.coordinates                        # (N, 3)
         degrees = skel_obj.degrees                            # (N,)
 
         # normalise position to [0,1] within volume
@@ -771,10 +772,12 @@ class ClassificationLogic:
 
             path = skel_obj.path_coordinates(int(row_idx)).astype(int)
             radii = dist[path[:, 0], path[:, 1], path[:, 2]]
-            euc   = max(float(row["euclidean-distance"]), 1e-6)
+            euc = max(float(row["euclidean-distance"]), 1e-6)
 
-            edge_src.append(src);  edge_dst.append(dst)
-            edge_src.append(dst);  edge_dst.append(src)  # undirected
+            edge_src.append(src)
+            edge_dst.append(dst)
+            edge_src.append(dst)
+            edge_dst.append(src)  # undirected
 
             feats = [
                 float(row["branch-distance"]),
@@ -791,11 +794,11 @@ class ClassificationLogic:
         edge_attr  = torch.tensor(edge_feats, dtype=torch.float)
 
         return Data(
-            x          = torch.tensor(node_feats,   dtype=torch.float),
+            x = torch.tensor(node_feats,   dtype=torch.float),
             edge_index = edge_index,
-            edge_attr  = edge_attr,
-            y          = torch.tensor(node_labels,  dtype=torch.long),
-            num_nodes  = len(coords),
+            edge_attr = edge_attr,
+            y = torch.tensor(node_labels,  dtype=torch.long),
+            num_nodes = len(coords),
         )
 
     def _assign_node_label(self, coord, label_vol):
@@ -821,10 +824,10 @@ class ClassificationLogic:
         path = Path(path)
 
         if path.suffix in [".nii", ".gz"] or str(path).endswith(".nii.gz"):
-            nii    = nib.load(str(path))
-            data   = nii.get_fdata().astype(np.uint8)
+            nii = nib.load(str(path))
+            data = nii.get_fdata().astype(np.uint8)
             affine = nii.affine
-            zooms  = nii.header.get_zooms()
+            zooms = nii.header.get_zooms()
 
         elif path.suffix == ".nrrd":
             import nrrd

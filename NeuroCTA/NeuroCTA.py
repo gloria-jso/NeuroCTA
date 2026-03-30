@@ -164,6 +164,11 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
         self.logic = widget.logic
         self.layout.addWidget(widget)
 
+        colorLogic = slicer.modules.colors.logic()
+        labelFilePath = os.path.join(os.path.dirname(__file__), "..", "Resources", "Colors", "labelmap_topbrain_ct.txt")
+        if os.path.exists(labelFilePath):
+            self._colorNode = colorLogic.LoadColorFile(labelFilePath)
+
 
 
     def onReload(self):

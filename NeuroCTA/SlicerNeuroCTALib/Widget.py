@@ -97,6 +97,9 @@ class Widget(qt.QWidget):
         inputsFormLayout.addItem(qt.QSpacerItem(0, 6))
         inputsFormLayout.addRow(self.vesselTable)
 
+        self._exportButton = qt.QPushButton("Export Segments Table to CSV")
+        self._exportButton.connect("clicked()", self._onExportTable)
+        inputsFormLayout.addRow(self._exportButton)
 
         # ─────────────────── Segmentation collapsible ────────────────────────
         self.segCollapsibleButton = ctk.ctkCollapsibleButton()
@@ -181,8 +184,30 @@ class Widget(qt.QWidget):
 
         self.segFilePathEdit = ctk.ctkPathLineEdit()
         self.segFilePathEdit.filters = ctk.ctkPathLineEdit.Files
-        self.segFilePathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Data/TopBrainData/topcow_ct_024.nii.gz")
+        self.segFilePathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Mar4/topcow_ct_024_fullRes-segmentation.seg.nrrd")
         classificationFormLayout.addRow("Segmentation file:", self.segFilePathEdit)
+
+        # Model type selection
+        self.classModelTypeLabel = qt.QLabel("Model type:")
+
+        self.sageRadio = qt.QRadioButton("SAGEConv")
+        self.gineRadio  = qt.QRadioButton("GINConv")
+
+        # default selection
+        self.sageRadio.setChecked(True)
+
+        # group them (important)
+        self.modelTypeGroup = qt.QButtonGroup()
+        self.modelTypeGroup.addButton(self.sageRadio)
+        self.modelTypeGroup.addButton(self.gineRadio)
+
+        # layout
+        self.classModelTypeLayout = qt.QHBoxLayout()
+        self.classModelTypeLayout.addWidget(self.sageRadio)
+        self.classModelTypeLayout.addWidget(self.gineRadio)
+
+        # add to form
+        self.classOptionsLayout.addRow(self.classModelTypeLabel, self.classModelTypeLayout)
 
         classificationFormLayout.addItem(qt.QSpacerItem(0, 5))
         self.runInferenceButton = qt.QPushButton("Run Vessel Classification")
@@ -385,7 +410,10 @@ class Widget(qt.QWidget):
         threeDView.resetFocalPoint()
 
     def getCurrentVolumeNode(self):
-        return self.inputSelector.currentNode()        
+        return self.inputSelector.currentNode()   
+
+    def _onExportTable(self):
+        self.vesselTable.export()     
 
 
     # Segmentation
@@ -438,12 +466,27 @@ class Widget(qt.QWidget):
             if not path:
                 slicer.util.errorDisplay("No model path set.")
                 return
+            if self.sageRadio.isChecked():
+                model = VesselSAGE(
+                    in_channels=5,
+                    hidden_channels=128,
+                    num_classes=40,
+                    n_layers=4,
+                    dropout=0.3
+                )
+            else:
+                model = VesselGNN(
+                    in_channels=5,
+                    edge_dim=6,
+                    hidden_channels=128,
+                    num_classes=40,
+                    n_layers=4,
+                    dropout=0.3
+                )
             try:
                 self.classLogic.loadModel(
                     path,
-                    # VesselGNN(in_channels=5, edge_dim=6, hidden_channels=128,
-                    #         num_classes=40, n_layers=4, dropout=0.3)
-                    VesselSAGE(in_channels=4, hidden_channels=128,num_classes=40, n_layers=4, dropout=0.3)
+                    model
                 )
             except Exception as e:
                 slicer.util.errorDisplay(f"Failed to load model: {e}")
@@ -451,7 +494,27 @@ class Widget(qt.QWidget):
 
         # reload if path changed
         elif self.classModelPathEdit.currentPath != self.classLogic.loadedModelPath:
-            self.classLogic.loadModel(...)
+            path = self.classModelPathEdit.currentPath
+
+            if self.sageRadio.isChecked():
+                model = VesselSAGE(
+                    in_channels=5,
+                    hidden_channels=128,
+                    num_classes=40,
+                    n_layers=4,
+                    dropout=0.3
+                )
+            else:
+                model = VesselGNN(
+                    in_channels=5,
+                    edge_dim=6,
+                    hidden_channels=128,
+                    num_classes=40,
+                    n_layers=4,
+                    dropout=0.3
+                )
+
+            self.classLogic.loadModel(path, model)
         
         # load directly from file — bypasses Slicer's export geometry issues
         segFilePath = self.segFilePathEdit.currentPath
@@ -466,7 +529,14 @@ class Widget(qt.QWidget):
             return
 
         binary_mask  = (seg_vol > 0).astype(np.uint8)
-        voxelSpacing = [float(zooms[2]), float(zooms[1]), float(zooms[0])]
+
+
+        modelType = "SAGE" if self.sageRadio.isChecked() else "GINE"
+
+        # if modelType == "SAGE":
+        #     voxelSpacing = [float(zooms[2]), float(zooms[1]), float(zooms[0])]
+        # else:
+        voxelSpacing = [float(zooms[0]), float(zooms[1]), float(zooms[2])]
 
         print("Shape:", binary_mask.shape)
         print("Zooms:", zooms)
@@ -474,7 +544,8 @@ class Widget(qt.QWidget):
         print("Affine:\n", affine)
 
         ras_coords, preds = self.classLogic.runClassInference(
-            binary_mask, None, voxelSpacing, affine
+            binary_mask, None, voxelSpacing, affine,
+            modelType
         )
         self._displayClassificationResults(ras_coords, preds)
 
