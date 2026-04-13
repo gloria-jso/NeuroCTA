@@ -163,11 +163,10 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
         widget = Widget()
         self.logic = widget.logic
         self.layout.addWidget(widget)
-        widget.setMRMLScene(slicer.mrmlScene)
 
         dock = slicer.util.mainWindow().findChild(qt.QDockWidget)
         dock.setMaximumWidth(2000)
-
+        dock.setMinimumWidth(600)
 
 
     def onReload(self):
