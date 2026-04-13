@@ -2,7 +2,7 @@ import logging
 import os
 from typing import Annotated, Optional
 from SlicerNeuroCTALib import Widget
-
+import qt
 import vtk
 
 import slicer
@@ -163,11 +163,10 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
         widget = Widget()
         self.logic = widget.logic
         self.layout.addWidget(widget)
+        widget.setMRMLScene(slicer.mrmlScene)
 
-        colorLogic = slicer.modules.colors.logic()
-        labelFilePath = os.path.join(os.path.dirname(__file__), "..", "Resources", "Colors", "labelmap_topbrain_ct.txt")
-        if os.path.exists(labelFilePath):
-            self._colorNode = colorLogic.LoadColorFile(labelFilePath)
+        dock = slicer.util.mainWindow().findChild(qt.QDockWidget)
+        dock.setMaximumWidth(2000)
 
 
 
@@ -175,7 +174,7 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
         import imp
 
         packageName = "SlicerNeuroCTALib"
-        submoduleNames = ["Signal", "Parameter", "InstallLogic", "Logic", "VesselTableManager", "Widget"]
+        submoduleNames = ["Signal", "Parameter", "InstallLogic", "VesselTableManager", "VesselGNN", "skeletonize_worker","Logic", "Widget"]
         f, filename, description = imp.find_module(packageName)
         package = imp.load_module(packageName, f, filename, description)
         for submoduleName in submoduleNames:
@@ -188,13 +187,6 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
 
         ScriptedLoadableModuleWidget.onReload(self)
 
-    # def __init__(self, parent=None) -> None:
-    #     """Called when the user opens the module the first time and the widget is initialized."""
-    #     ScriptedLoadableModuleWidget.__init__(self, parent)
-    #     VTKObservationMixin.__init__(self)  # needed for parameter node observation
-    #     self.logic = None
-    #     self._parameterNode = None
-    #     self._parameterNodeGuiTag = None
 
     # def setup(self) -> None:
     #     """Called when the user opens the module the first time and the widget is initialized."""
