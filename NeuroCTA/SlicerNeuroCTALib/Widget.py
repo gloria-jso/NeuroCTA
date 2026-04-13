@@ -119,18 +119,15 @@ class Widget(qt.QWidget):
 
         # nnUNetv2 Configuration
         self.nnUNetOptionsGroupBox = qt.QGroupBox()
-        self.nnUNetOptionsGroupBox.setStyleSheet("QGroupBox { margin-left: 18px; }")
         self.nnUNetOptionsLayout = qt.QFormLayout(self.nnUNetOptionsGroupBox)
-        self.modelPathLabel = qt.QLabel("Model path:")
         self.modelPathEdit = ctk.ctkPathLineEdit()
         self.modelPathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Models/Dataset001_TopBrain")
-        self.modelCheckpointLabel = qt.QLabel("Model checkpoint:")
         self.modelCheckpointEdit = qt.QLineEdit()
         self.modelCheckpointEdit.setText("checkpoint_best.pth")
 
         # Segmentation method label (own row)
         segmentationFormLayout.addRow(qt.QLabel("Method:"))
-        self.segMethods = ["nnUNetv2", "VMTK Vesselness Filter"]
+        self.segMethods = ["nnUNetv2"]
         self.segMethodGroup = qt.QButtonGroup()
         segMethodLayout = qt.QVBoxLayout()
         segMethodLayout.setAlignment(qt.Qt.AlignLeft)
@@ -142,8 +139,8 @@ class Widget(qt.QWidget):
             segMethodLayout.addWidget(radio)
 
             if method == "nnUNetv2":
-                self.nnUNetOptionsLayout.addRow(self.modelPathLabel, self.modelPathEdit)
-                self.nnUNetOptionsLayout.addRow(self.modelCheckpointLabel, self.modelCheckpointEdit)
+                self.nnUNetOptionsLayout.addRow(qt.QLabel("Model path:"), self.modelPathEdit)
+                self.nnUNetOptionsLayout.addRow(qt.QLabel("Model checkpoint:"), self.modelCheckpointEdit)
                 segMethodLayout.addWidget(self.nnUNetOptionsGroupBox)
 
         
@@ -155,63 +152,53 @@ class Widget(qt.QWidget):
         segmentationFormLayout.addRow("", self.runSegPushButton)
 
 
-        # ─────────────────── Vessel Classification  ────────────────────────
-        self.classCollapsibleButton = ctk.ctkCollapsibleButton()
-        self.classCollapsibleButton.setStyleSheet("""
+        # ─────────────────── Vessel Classification ────────────────────────
+        classCollapsibleButton = ctk.ctkCollapsibleButton()
+        classCollapsibleButton.setStyleSheet("""
             ctkCollapsibleButton {
                 background-color: #d9dbd9;  /* background color */
                 border: 1px solid gray;
                 border-radius: 4px;
             }
         """)
-        self.classCollapsibleButton.text = "Vessel Classification"
-        self.classCollapsibleButton.collapsed = True
-        layout.addWidget(self.classCollapsibleButton)
+        classCollapsibleButton.text = "Vessel Classification"
+        classCollapsibleButton.collapsed = True
+        layout.addWidget(classCollapsibleButton)
 
-        classificationFormLayout = qt.QFormLayout(self.classCollapsibleButton)
-        classificationFormLayout.setContentsMargins(12,12,12,12)
+        classificationFormLayout = qt.QFormLayout(classCollapsibleButton)
+        classificationFormLayout.setContentsMargins(12, 12, 12, 12)
 
-        # Vessel classification
-        self.classOptionsGroupBox = qt.QGroupBox()
-        self.classOptionsGroupBox.setStyleSheet("QGroupBox { margin-left: 18px; }")
-        self.classOptionsLayout = qt.QFormLayout(self.classOptionsGroupBox)
-        self.classModelPathLabel = qt.QLabel("Model path:")
+        # Model path and model type inside a QGroupBox with QFormLayout
+        classOptionsGroupBox = qt.QGroupBox()
+        classOptionsLayout = qt.QFormLayout(classOptionsGroupBox)
+
         self.classModelPathEdit = ctk.ctkPathLineEdit()
-        self.classModelPathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Models/Graph_Neural_Network/best_model_sage_fold1.pt")
+        self.classModelPathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Models/Graph_Neural_Network/best_model_sage_fold0.pt")
+        classOptionsLayout.addRow(qt.QLabel("Model path:"), self.classModelPathEdit)
 
-        self.classOptionsLayout.addRow(self.classModelPathLabel, self.classModelPathEdit)
-        classificationFormLayout.addWidget(self.classOptionsGroupBox)
+        # self.segFilePathEdit = ctk.ctkPathLineEdit()
+        # self.segFilePathEdit.filters = ctk.ctkPathLineEdit.Files
+        # self.segFilePathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Mar4/topcow_ct_024_fullRes-segmentation.seg.nrrd")
+        # classOptionsLayout.addRow(qt.QLabel("Segmentation file:"), self.segFilePathEdit)
 
-        self.segFilePathEdit = ctk.ctkPathLineEdit()
-        self.segFilePathEdit.filters = ctk.ctkPathLineEdit.Files
-        self.segFilePathEdit.setCurrentPath("/Users/gloriaso/Desktop/BME499/Mar4/topcow_ct_024_fullRes-segmentation.seg.nrrd")
-        classificationFormLayout.addRow("Segmentation file:", self.segFilePathEdit)
-
-        # Model type selection
-        self.classModelTypeLabel = qt.QLabel("Model type:")
-
+        # Model type radio buttons
         self.sageRadio = qt.QRadioButton("SAGEConv")
-        self.gineRadio  = qt.QRadioButton("GINConv")
-
-        # default selection
+        self.gineRadio = qt.QRadioButton("GINConv")
         self.sageRadio.setChecked(True)
-
-        # group them (important)
         self.modelTypeGroup = qt.QButtonGroup()
         self.modelTypeGroup.addButton(self.sageRadio)
         self.modelTypeGroup.addButton(self.gineRadio)
 
-        # layout
-        self.classModelTypeLayout = qt.QHBoxLayout()
-        self.classModelTypeLayout.addWidget(self.sageRadio)
-        self.classModelTypeLayout.addWidget(self.gineRadio)
+        classModelTypeLayout = qt.QHBoxLayout()
+        classModelTypeLayout.addWidget(self.sageRadio)
+        classModelTypeLayout.addWidget(self.gineRadio)
+        classOptionsLayout.addRow(qt.QLabel("Model type:"), classModelTypeLayout)
 
-        # add to form
-        self.classOptionsLayout.addRow(self.classModelTypeLabel, self.classModelTypeLayout)
+        classificationFormLayout.addRow(classOptionsGroupBox)
 
         classificationFormLayout.addItem(qt.QSpacerItem(0, 5))
-        self.runInferenceButton = qt.QPushButton("Run Vessel Classification")
-        classificationFormLayout.addWidget(self.runInferenceButton)
+        self.runInferenceButton = qt.QPushButton("▶︎ Run Vessel Classification")
+        classificationFormLayout.addRow("", self.runInferenceButton)
         self.runInferenceButton.connect('clicked()', self.onRunClassInference)
 
 
@@ -334,14 +321,21 @@ class Widget(qt.QWidget):
             self.inputLabel.setText("Input volume:")
             self._setSectionState(self.segCollapsibleButton,   enabled=True,  collapsed=False)
             self._setSectionState(self.skelCollapsibleButton,  enabled=False, collapsed=True)
-            # self._setSectionState(self.featExCollapsibleButton,enabled=False, collapsed=True)
 
         else:  # Segmentation
             self.inputSelector.nodeTypes = ["vtkMRMLSegmentationNode"]
             self.inputLabel.setText("Input segmentation:")
             self._setSectionState(self.segCollapsibleButton,   enabled=False, collapsed=True)
             self._setSectionState(self.skelCollapsibleButton,  enabled=True,  collapsed=False)
-            # self._setSectionState(self.featExCollapsibleButton,enabled=False, collapsed=True)
+        
+        self.inputSelector.setMRMLScene(slicer.mrmlScene)
+
+        # Force selection of first available node
+        node = self.inputSelector.currentNode()
+        if not node:
+            node = slicer.mrmlScene.GetFirstNodeByClass(self.inputSelector.nodeTypes[0])
+            if node:
+                self.inputSelector.setCurrentNode(node)
 
     def onInputNodeChanged(self, node) -> None:
         self._stopSegmentPicking()
@@ -609,6 +603,8 @@ class Widget(qt.QWidget):
         """
         Run processing when user clicks "Run Skeletonization" button.
         """
+        self._currentSkelMethod = self.skelMethodGroup.checkedButton().text
+
         inputNode = self.inputSelector.currentNode()
         if inputNode is None:
             slicer.util.errorDisplay("No input selected.")
@@ -625,28 +621,26 @@ class Widget(qt.QWidget):
 
         method = self.skelMethodGroup.checkedButton().text        
         if method == "VMTK Extract Centerline":
-            self._runVMTKCenterlineExtraction(inputNode)
+            self.skelLogic.startVMTKCenterlineExtraction(inputNode)
         elif method == "Medial axis thinning":
-            self._runVoxelSkeletonization(inputNode)
+            self._runMedialAxisSkel(inputNode)
 
-        # self._setSectionState(self.skelCollapsibleButton,   enabled=True, collapsed=True)
-        # self._setSectionState(self.featExCollapsibleButton, enabled=True, collapsed=False)
-
-    def _runVoxelSkeletonization(self, inputNode):
+    def _runMedialAxisSkel(self, inputNode):
         labelmapNode = None
         volumeArray = None
 
         if self.unsegmentedRadio.isChecked():
-            volumeArray   = slicer.util.arrayFromVolume(inputNode)
+            volumeArray = slicer.util.arrayFromVolume(inputNode)
             referenceNode = inputNode
             print(f"Using scalar volume: {inputNode.GetName()}")
         else:
-            labelmapNode  = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
+            name = f"{inputNode.GetName()}"
+            labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", name)
             slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
                 inputNode, labelmapNode, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY
             )
 
-        volumeArray   = slicer.util.arrayFromVolume(labelmapNode)
+        volumeArray = slicer.util.arrayFromVolume(labelmapNode)
         referenceNode = labelmapNode
         print(f"Using segmentation: {inputNode.GetName()}")
 
@@ -661,24 +655,31 @@ class Widget(qt.QWidget):
             np.linalg.norm([self._ijkToRas.GetElement(r, 2) for r in range(3)]),
         ]
 
-         # --- Set up logic (same signal pattern as nnUNet) ---
+        # set up logic
         self._setButtonProgress(self.runSkelPushButton, 0, 1, "Skeletonizing...")
-        self.skelLogic.startSkeletonization(volumeArray, segmentation, self._ijkToRas, voxelSpacing)
+        self.skelLogic.startMedialAxisSkel(volumeArray, segmentation, self._ijkToRas, voxelSpacing)
+
+        # Delete temp labelmap node
+        if labelmapNode:
+            slicer.mrmlScene.RemoveNode(labelmapNode)
+
 
     def onSkelProgress(self, current, total):
         self._setButtonProgress(self.runSkelPushButton, current, total, "Skeletonizing...")
         
-
     def onSkelFinished(self):
         try:
-            skeletons = self.skelLogic.loadResults(self._segmentationNode, self._ijkToRas)
+            if self._currentSkelMethod == "VMTK Extract Centerline":
+                skeletons = self.skelLogic.loadResults(self._segmentationNode)
+            else:
+                skeletons = self.skelLogic.loadResults(self._segmentationNode, self._ijkToRas)
         except RuntimeError as e:
             slicer.util.errorDisplay(str(e))
             return
         finally:
             self._resetButton(self.runSkelPushButton, "▶︎ Run Skeletonization")
 
-        self.vesselTable.setSkeletons(skeletons) 
+        self.vesselTable.setSkeletons(skeletons)
         self.vesselTable.removeCLColumns()
         self.vesselTable.populateCLColumn()
         self.vesselTable.populateFeatureColumns()
@@ -816,11 +817,18 @@ class Widget(qt.QWidget):
     def onToggleBranchingPoints(self, checked: bool) -> None:
         if not hasattr(self.vesselTable, '_skeletonsBySegment'):
             return
-        
-        for segmentName in self.vesselTable._skeletonsBySegment:
-            bpNode = slicer.mrmlScene.GetFirstNodeByName(f"BP_{segmentName}")
-            if bpNode and bpNode.GetDisplayNode():
-                bpNode.GetDisplayNode().SetVisibility(checked)
+        for segmentName, data in self.vesselTable._skeletonsBySegment.items():
+            # medial axis nodes by name
+            for prefix in ["BP_", "EP_"]:
+                node = slicer.mrmlScene.GetFirstNodeByName(f"{prefix}{segmentName}")
+                if node and node.GetDisplayNode():
+                    node.GetDisplayNode().SetVisibility(checked)
+            # VMTK endpoint node by ID
+            ep_node_id = data.get("ep_node_id")
+            if ep_node_id:
+                node = slicer.mrmlScene.GetNodeByID(ep_node_id)
+                if node and node.GetDisplayNode():
+                    node.GetDisplayNode().SetVisibility(checked)
 
     def _setSectionState(self, collapsibleButton, enabled, collapsed):
         collapsibleButton.setEnabled(enabled)

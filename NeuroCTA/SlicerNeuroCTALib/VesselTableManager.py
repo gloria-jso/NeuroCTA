@@ -102,7 +102,7 @@ class VesselTableManager(qt.QTableWidget):
 
     def populateFeatureColumns(self):
         # --- Remove existing metric columns ---
-        metricColNames = ["Length (mm)", "Tortuosity", "Mean Radius (mm)"]
+        metricColNames = ["Length (mm)", "Tortuosity (DM)", "Tortuosity (SOAM)", "Mean Radius (mm)"]
         headers = [self.horizontalHeaderItem(c).text()
                 for c in range(self.columnCount)]
         for colName in metricColNames:
@@ -128,14 +128,15 @@ class VesselTableManager(qt.QTableWidget):
 
         metricToHeader = {
             "length":      "Length (mm)",
-            "tortuosity":  "Tortuosity",
+            "tortuosity_dm":  "Tortuosity (DM)",
+            "tortuosity_soam": "Tortuosity (SOAM)",
             "mean_radius": "Mean Radius (mm)",
         }
 
         for i in range(self.rowCount):
             segmentation = self._segmentationNode.GetSegmentation()
-            segmentId    = segmentation.GetNthSegmentID(i)
-            segmentName  = segmentation.GetSegment(segmentId).GetName()
+            segmentId = segmentation.GetNthSegmentID(i)
+            segmentName = segmentation.GetSegment(segmentId).GetName()
 
             data     = self._skeletonsBySegment.get(segmentName, {})
             features = data.get("features", {}) if isinstance(data, dict) else {}
@@ -143,9 +144,9 @@ class VesselTableManager(qt.QTableWidget):
             for featureKey, headerName in metricToHeader.items():
                 if headerName not in headers:
                     continue
-                col   = headers.index(headerName)
+                col  = headers.index(headerName)
                 value = features.get(featureKey, "N/A")
-                text  = f"{value:.3f}" if isinstance(value, float) else str(value)
+                text = f"{value:.3f}" if isinstance(value, float) else str(value)
                 self.setItem(i, col, qt.QTableWidgetItem(text))
         self._syncToSlicerTableNode()
 

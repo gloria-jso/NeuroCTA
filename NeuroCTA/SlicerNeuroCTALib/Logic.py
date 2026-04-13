@@ -309,17 +309,6 @@ class Logic:
 
         print("nnU-Net inference started...")
 
-    def startSkeletonization(
-            self,
-            inputNode,
-            method
-        ):       
-        if method == "VMTK Extract Centerline":
-            self._runVMTKCenterlineExtraction(inputNode)
-        elif method == "Medial axis thinning":
-            self._runVoxelSkeletonization(inputNode)
-
-
 class Process:
     """
     Convenience wrapper around QProcess run.
@@ -380,17 +369,7 @@ from .Signal import Signal
 
 class SkeletonizationLogic:
     """
-    Segmentation logic for voxel skeletonization.
-    Mirrors the nnUNet SegmentationLogic pattern — serializes volume data
-    to a temp directory, runs skeletonize_worker.py as a QProcess subprocess,
-    then deserializes results back into Slicer model nodes.
 
-    Usage:
-    >>> logic = SkeletonizationLogic()
-    >>> logic.progressInfo.connect(print)
-    >>> logic.errorOccurred.connect(slicer.util.errorDisplay)
-    >>> logic.finished.connect(lambda: logic.loadResults(segmentation, ijkToRas))
-    >>> logic.startSkeletonization(volumeArray, segmentation, ijkToRas)
     """
 
     def __init__(self, process: Optional[ProcessProtocol]=None):
@@ -400,7 +379,7 @@ class SkeletonizationLogic:
         self.progressUpdated = Signal("int", "int")
 
         self.skeletonizationProcess = process or Process(qt.QProcess.MergedChannels)
-        self.skeletonizationProcess.finished.connect(lambda *args: self.skelFinished())
+        self.skeletonizationProcess.finished.connect(self._onSkelFinished)
         self.skeletonizationProcess.errorOccurred.connect(self.errorOccurred)
         self.skeletonizationProcess.readInfo.connect(self._onProgressInfo)
 
@@ -417,6 +396,11 @@ class SkeletonizationLogic:
     def waitForFinished(self):
         self.skeletonizationProcess.waitForFinished()
 
+    def _onSkelFinished(self, *args):
+        elapsed = time.time() - self._skelStartTime
+        print(f"Skeletonization took {elapsed:.2f}s")
+        self.skelFinished()
+
     def _onProgressInfo(self, msg: str):
         for line in msg.strip().splitlines():
             if line.startswith("PROGRESS:"):
@@ -432,7 +416,7 @@ class SkeletonizationLogic:
                 self.progressInfo(line)
 
 
-    def startSkeletonization(
+    def startMedialAxisSkel(
         self,
         volumeArray: np.ndarray,
         segmentation: "slicer.vtkSegmentation",
@@ -447,30 +431,35 @@ class SkeletonizationLogic:
             self.errorOccurred("Failed to write inputs to temp directory.")
             return
 
+        self._skelStartTime = time.time()
         self._startSkelProcess()
 
-    def loadResults(self, segmentationNode, ijkToRas):
-        output_path = Path(self._tmpDir.path()) / "results.json"
-        if not output_path.exists():
-            raise RuntimeError("Worker output not found. Check logs for errors.")
+    def loadResults(self, segmentationNode, ijkToRas=None):
+        use_vmtk = ijkToRas is None
 
-        with open(output_path) as f:
-            results = json.load(f)
-
-        m = np.array([
-            [ijkToRas.GetElement(r, c) for c in range(4)]
-            for r in range(4)
-        ])
+        if use_vmtk:
+            results = self._results
+            m = None
+        else:
+            output_path = Path(self._tmpDir.path()) / "results.json"
+            if not output_path.exists():
+                raise RuntimeError("Worker output not found.")
+            with open(output_path) as f:
+                results = json.load(f)
+            m = np.array([[ijkToRas.GetElement(r, c) for c in range(4)] for r in range(4)])
 
         shNode = slicer.mrmlScene.GetSubjectHierarchyNode()
 
         # --- Clean up old folder if exists ---
         existingRef = segmentationNode.GetNodeReferenceID("SkeletonFolder")
         if existingRef:
-            existingItem = shNode.GetItemByUID(slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyUIDByName("SkeletonFolder"), existingRef)
             oldItem = int(existingRef) if existingRef.isdigit() else 0
-            if oldItem and shNode.GetItem(oldItem):
-                shNode.RemoveItem(oldItem)
+            if oldItem:
+                try:
+                    shNode.RemoveItem(oldItem)
+                except Exception:
+                    pass
+            segmentationNode.RemoveNodeReferenceIDs("SkeletonFolder")
 
         # --- Create fresh folder hierarchy ---
         segNodeName = segmentationNode.GetName()
@@ -492,8 +481,11 @@ class SkeletonizationLogic:
                 continue
 
             # IJK -> RAS
-            ijk_h   = np.column_stack([coords[:, 2], coords[:, 1], coords[:, 0], np.ones(len(coords))])
-            ras_pts = (m @ ijk_h.T).T[:, :3]
+            if not use_vmtk:
+                ijk_h  = np.column_stack([coords[:, 2], coords[:, 1], coords[:, 0], np.ones(len(coords))])
+                ras_pts = (m @ ijk_h.T).T[:, :3]
+            else:
+                ras_pts = coords  # already RAS
 
             # Build polydata
             points = vtk.vtkPoints()
@@ -529,32 +521,180 @@ class SkeletonizationLogic:
 
             skeletonsBySegment[segmentName] = {
                 "modelNode": modelNode,
-                "features":  data.get("features", {})
+                "features":  data.get("features", {}),
+                "ep_node_id": data.get("ep_node_id")
             }
 
             # --- Branch points ---
             bp_coords = data.get("features", {}).get("branch_point_coords", [])
             if bp_coords:
                 bp_coords = np.array(bp_coords)
-                ijk_h   = np.column_stack([bp_coords[:, 2], bp_coords[:, 1], bp_coords[:, 0], np.ones(len(bp_coords))])
-                ras_pts = (m @ ijk_h.T).T[:, :3]
+                if not use_vmtk:
+                    ijk_h  = np.column_stack([bp_coords[:, 2], bp_coords[:, 1], bp_coords[:, 0], np.ones(len(bp_coords))])
+                    ras_pts = (m @ ijk_h.T).T[:, :3]
+                else:
+                    ras_pts = bp_coords  # already RAS
 
                 existing = slicer.mrmlScene.GetFirstNodeByName(f"BP_{segmentName}")
                 if existing:
                     slicer.mrmlScene.RemoveNode(existing)
 
-                bpNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"BP_{segmentName}")
+                bpNode = slicer.mrmlScene.AddNewNodeByClass(
+                    "vtkMRMLMarkupsFiducialNode",
+                    slicer.mrmlScene.GetUniqueNameByString(f"BP_{segmentName}")
+                )
                 bpNode.CreateDefaultDisplayNodes()
-                bpNode.GetDisplayNode().SetGlyphScale(1.0)
                 bpNode.GetDisplayNode().SetSelectedColor(r, g, b)
                 bpNode.GetDisplayNode().SetColor(r, g, b)
+                bpNode.GetDisplayNode().SetTextScale(0)
                 shNode.SetItemParent(shNode.GetItemByDataNode(bpNode), bpFolder)
 
                 for pt in ras_pts:
                     bpNode.AddControlPoint(vtk.vtkVector3d(pt[0], pt[1], pt[2]))
 
+            # --- End points ---
+            ep_coords = data.get("features", {}).get("end_point_coords", [])
+            if ep_coords:
+                ep_coords = np.array(ep_coords)
+                if not use_vmtk:
+                    ijk_h  = np.column_stack([ep_coords[:, 2], ep_coords[:, 1], ep_coords[:, 0], np.ones(len(ep_coords))])
+                    ras_pts = (m @ ijk_h.T).T[:, :3]
+                else:
+                    ras_pts = ep_coords  # already RAS
+
+                existing = slicer.mrmlScene.GetFirstNodeByName(f"EP_{segmentName}")
+                if existing:
+                    slicer.mrmlScene.RemoveNode(existing)
+
+                epNode = slicer.mrmlScene.AddNewNodeByClass(
+                    "vtkMRMLMarkupsFiducialNode",
+                    slicer.mrmlScene.GetUniqueNameByString(f"EP_{segmentName}")
+                )
+                epNode.CreateDefaultDisplayNodes()
+                epNode.GetDisplayNode().SetSelectedColor(r, g, b)
+                epNode.GetDisplayNode().SetColor(r, g, b)
+                epNode.GetDisplayNode().SetTextScale(0)
+                epNode.GetDisplayNode().SetGlyphScale(2.0)
+                shNode.SetItemParent(shNode.GetItemByDataNode(epNode), bpFolder)
+
+                for pt in ras_pts:
+                    epNode.AddControlPoint(vtk.vtkVector3d(pt[0], pt[1], pt[2]))
+
         return skeletonsBySegment
     
+
+    def startVMTKCenterlineExtraction(self, segmentationNode: "slicer.vtkMRMLSegmentationNode") -> None:
+        self._segmentationNode = segmentationNode
+        self._skelStartTime = time.time()
+        qt.QTimer.singleShot(0, self._runVMTK)
+
+    def _runVMTK(self):
+        try:
+            self._results = self._extractAllCenterlines()
+            elapsed = time.time() - self._skelStartTime
+            print(f"VMTK centerline extraction took {elapsed:.2f}s")
+            self.skelFinished()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.errorOccurred(str(e))
+
+    def _extractAllCenterlines(self):
+        logic = ExtractCenterlineLogic()
+        segmentation = self._segmentationNode.GetSegmentation()
+        nSegments = segmentation.GetNumberOfSegments()
+        results = {}
+
+        for i in range(nSegments):
+            segmentId = segmentation.GetNthSegmentID(i)
+            segment = segmentation.GetSegment(segmentId)
+            segmentName = segment.GetName()
+            r, g, b = segment.GetColor()
+
+            self.progressUpdated(i, nSegments)
+            # self.progressInfo(f"Extracting centerline: {segmentName}")
+            slicer.app.processEvents()
+
+            try:
+                polyData = logic.polyDataFromNode(self._segmentationNode, segmentId)
+                if not polyData or polyData.GetNumberOfPoints() == 0:
+                    self.progressInfo(f"Skipping {segmentName} — empty surface")
+                    continue
+
+                preprocessed = logic.preprocess(polyData, targetNumberOfPoints=5000,
+                                                decimationAggressiveness=4.0, subdivide=False)
+                networkPolyData   = logic.extractNetwork(preprocessed, endPointsMarkupsNode=None)
+                endpointPositions = logic.getEndPoints(networkPolyData, startPointPosition=None)
+
+                if len(endpointPositions) < 2:
+                    self.progressInfo(f"Skipping {segmentName} — fewer than 2 endpoints")
+                    continue
+
+                # Keep endpoints in scene with correct display
+                endpointsNode = slicer.mrmlScene.AddNewNodeByClass(
+                    "vtkMRMLMarkupsFiducialNode",
+                    slicer.mrmlScene.GetUniqueNameByString(f"EP_{segmentName}"))
+                endpointsNode.CreateDefaultDisplayNodes()
+                endpointsNode.GetDisplayNode().SetSelectedColor(r, g, b)
+                endpointsNode.GetDisplayNode().SetColor(r, g, b)
+                endpointsNode.GetDisplayNode().SetGlyphScale(2.0)
+                endpointsNode.GetDisplayNode().SetTextScale(0)
+                for pos in endpointPositions:
+                    endpointsNode.AddControlPoint(vtk.vtkVector3d(pos))
+                endpointsNode.SetNthControlPointSelected(0, False)
+
+                centerlinePolyData, _ = logic.extractCenterline(
+                    preprocessed, endpointsNode, curveSamplingDistance=1.0)
+
+                centerlinePoints = centerlinePolyData.GetPoints()
+                coords_ras = []
+                for ptIdx in range(centerlinePoints.GetNumberOfPoints()):
+                    coords_ras.append(list(centerlinePoints.GetPoint(ptIdx)))
+
+                tableNode = slicer.mrmlScene.AddNewNodeByClass(
+                    "vtkMRMLTableNode", f"tmp_table_{segmentName}")
+                logic.createCurveTreeFromCenterline(
+                    centerlinePolyData, centerlineCurveNode=None,
+                    centerlinePropertiesTableNode=tableNode, curveSamplingDistance=1.0)
+
+                table = tableNode.GetTable()
+                lengths, tortuosities, radii_vals = [], [], []
+                for row in range(table.GetNumberOfRows()):
+                    lengths.append(table.GetColumnByName("Length").GetValue(row))
+                    tortuosities.append(table.GetColumnByName("Tortuosity").GetValue(row))
+                    radii_vals.append(table.GetColumnByName("Radius").GetValue(row))
+
+                results[segmentName] = {
+                    "coords": coords_ras,
+                    "color":  [r, g, b],
+                    "ep_node_id": endpointsNode.GetID(),
+                    "features": {
+                        "length":              float(sum(lengths)),
+                        "tortuosity_dm":       float(np.mean(tortuosities)) + 1,
+                        "mean_radius":         float(np.mean(radii_vals)),
+                        "min_radius":          float(np.min(radii_vals)),
+                        "max_radius":          float(np.max(radii_vals)),
+                        "branch_point_coords": [],
+                        "end_point_coords":    [list(pos) for pos in endpointPositions],
+                    }
+                }
+
+                self.progressInfo(f"[{i+1}/{nSegments}] {segmentName} - {len(coords_ras)} points ")
+
+
+            except Exception as e:
+                self.progressInfo(f"Failed {segmentName}: {e}")
+                import traceback
+                traceback.print_exc()
+
+            finally:
+                # Only remove table node — keep endpointsNode in scene
+                node = slicer.mrmlScene.GetFirstNodeByName(f"tmp_table_{segmentName}")
+                if node:
+                    slicer.mrmlScene.RemoveNode(node)
+
+        self.progressUpdated(nSegments, nSegments)
+        return results
 
     # ── Private ────────────────────────────────────────────────────────────────
 
