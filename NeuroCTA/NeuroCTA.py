@@ -173,7 +173,7 @@ class NeuroCTAWidget(ScriptedLoadableModuleWidget):
         import imp
 
         packageName = "SlicerNeuroCTALib"
-        submoduleNames = ["Signal", "Parameter", "InstallLogic", "VesselTableManager", "VesselGNN", "skeletonize_worker","Logic", "Widget"]
+        submoduleNames = ["Signal", "Parameter", "InstallLogic", "VesselTableManager", "VesselGINE", "skeletonize_worker","Logic", "Widget"]
         f, filename, description = imp.find_module(packageName)
         package = imp.load_module(packageName, f, filename, description)
         for submoduleName in submoduleNames:

@@ -8,7 +8,7 @@ def make_mlp(in_dim, out_dim):
         nn.Linear(out_dim, out_dim)
     )
 
-class VesselGNN(nn.Module):
+class VesselGINE(nn.Module):
     def __init__(self, in_channels, edge_dim, hidden_channels, num_classes, n_layers=4, dropout=0.3):
         super().__init__()
         from torch_geometric.nn import GINEConv

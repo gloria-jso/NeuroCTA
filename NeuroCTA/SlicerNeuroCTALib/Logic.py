@@ -541,7 +541,7 @@ class SkeletonizationLogic:
 
                 bpNode = slicer.mrmlScene.AddNewNodeByClass(
                     "vtkMRMLMarkupsFiducialNode",
-                    slicer.mrmlScene.GetUniqueNameByString(f"BP_{segmentName}")
+                    f"BP_{segmentName}"
                 )
                 bpNode.CreateDefaultDisplayNodes()
                 bpNode.GetDisplayNode().SetSelectedColor(r, g, b)
@@ -568,7 +568,7 @@ class SkeletonizationLogic:
 
                 epNode = slicer.mrmlScene.AddNewNodeByClass(
                     "vtkMRMLMarkupsFiducialNode",
-                    slicer.mrmlScene.GetUniqueNameByString(f"EP_{segmentName}")
+                    f"EP_{segmentName}"
                 )
                 epNode.CreateDefaultDisplayNodes()
                 epNode.GetDisplayNode().SetSelectedColor(r, g, b)
@@ -631,20 +631,21 @@ class SkeletonizationLogic:
                     continue
 
                 # Keep endpoints in scene with correct display
-                endpointsNode = slicer.mrmlScene.AddNewNodeByClass(
+                epNode = slicer.mrmlScene.AddNewNodeByClass(
                     "vtkMRMLMarkupsFiducialNode",
-                    slicer.mrmlScene.GetUniqueNameByString(f"EP_{segmentName}"))
-                endpointsNode.CreateDefaultDisplayNodes()
-                endpointsNode.GetDisplayNode().SetSelectedColor(r, g, b)
-                endpointsNode.GetDisplayNode().SetColor(r, g, b)
-                endpointsNode.GetDisplayNode().SetGlyphScale(2.0)
-                endpointsNode.GetDisplayNode().SetTextScale(0)
+                    f"EP_{segmentName}"
+                )
+                epNode.CreateDefaultDisplayNodes()
+                epNode.GetDisplayNode().SetSelectedColor(r, g, b)
+                epNode.GetDisplayNode().SetColor(r, g, b)
+                epNode.GetDisplayNode().SetTextScale(0)
+                epNode.GetDisplayNode().SetGlyphScale(2.0)
+
                 for pos in endpointPositions:
-                    endpointsNode.AddControlPoint(vtk.vtkVector3d(pos))
-                endpointsNode.SetNthControlPointSelected(0, False)
+                    epNode.AddControlPoint(vtk.vtkVector3d(pos))
 
                 centerlinePolyData, _ = logic.extractCenterline(
-                    preprocessed, endpointsNode, curveSamplingDistance=1.0)
+                    preprocessed, epNode, curveSamplingDistance=1.0)
 
                 centerlinePoints = centerlinePolyData.GetPoints()
                 coords_ras = []
@@ -667,7 +668,7 @@ class SkeletonizationLogic:
                 results[segmentName] = {
                     "coords": coords_ras,
                     "color":  [r, g, b],
-                    "ep_node_id": endpointsNode.GetID(),
+                    "ep_node_id": epNode.GetID(),
                     "features": {
                         "length":              float(sum(lengths)),
                         "tortuosity_dm":       float(np.mean(tortuosities)) + 1,
@@ -688,7 +689,7 @@ class SkeletonizationLogic:
                 traceback.print_exc()
 
             finally:
-                # Only remove table node — keep endpointsNode in scene
+                # Only remove table node — keep epNode in scene
                 node = slicer.mrmlScene.GetFirstNodeByName(f"tmp_table_{segmentName}")
                 if node:
                     slicer.mrmlScene.RemoveNode(node)
@@ -784,32 +785,38 @@ class ClassificationLogic:
         self.model.eval()
         self.loadedModelPath = modelPath
 
-    def runClassInference(self, binary_mask, _, voxel_spacing, affine, modelType):
+    def runClassInference(self, binary_mask, _, voxel_spacing, modelType):
+        
+        spacing_zyx = [voxel_spacing[2], voxel_spacing[1], voxel_spacing[0]]
 
-        # ── Skeleton + distance map ───────────────────────────────────────────────
+
+        # ── Skeleton + distance map ───────────────────────────
         skel = skeletonize(binary_mask)
 
         dist = distance_transform_edt(
             binary_mask,
-            sampling=voxel_spacing  # IMPORTANT: spacing applied here
+            sampling=voxel_spacing
         )
 
-        skel_obj = Skeleton(skel, spacing=voxel_spacing)
+        skel_obj = Skeleton(skel, spacing=spacing_zyx)
         stats = summarize(skel_obj, separator='-')
 
         coords = skel_obj.coordinates  
         degrees = skel_obj.degrees
 
-        # ── Node features ─────────────────────────────────────────────────────────
-        shape = np.array(binary_mask.shape, dtype=float)
-        norm_coords = coords / shape
+        # ── Node features ───────────────────────────────────
+        shape_zyx = np.array(binary_mask.shape, dtype=float)  # [Z, Y, X]
+        shape_xyz = shape_zyx[::-1]
+        coords_xyz = coords[:, ::-1]
+
+        norm_coords = coords_xyz / shape_xyz
 
         node_radii = dist[coords[:, 0].astype(int), coords[:, 1].astype(int), coords[:, 2].astype(int)]
         degrees_norm = degrees / (degrees.max() + 1e-6)
 
         node_feats = np.column_stack([norm_coords, degrees_norm, node_radii])  # (N, 5)
 
-        # ── Edge features ─────────────────────────────────────────────────────────
+        # ── Edge features ──────────────────────────────────
         edge_src, edge_dst, edge_feats = [], [], []
 
         for row_idx, row in stats.iterrows():
@@ -865,15 +872,15 @@ class ClassificationLogic:
 
         # ── Convert to RAS ─────────────────────────────────────────────────────────
         # coords are ZYX → convert to XYZ before affine
-        ras_coords = nib.affines.apply_affine(affine, coords)  
+        # ras_coords = nib.affines.apply_affine(affine, coords)  
 
-        print("Skel points:", coords.shape)
-        print("Coords min:", coords.min(axis=0))
-        print("Coords max:", coords.max(axis=0))
-        print("RAS coords min:", ras_coords.min(axis=0))
-        print("RAS coords max:", ras_coords.max(axis=0))
+        # print("Skel points:", coords.shape)
+        # print("Coords min:", coords.min(axis=0))
+        # print("Coords max:", coords.max(axis=0))
+        # print("RAS coords min:", ras_coords.min(axis=0))
+        # print("RAS coords max:", ras_coords.max(axis=0))
 
-        return ras_coords, preds
+        return coords, preds
 
     def voxelToRAS(self, norm_coords, affine, shape):
         vox_coords = norm_coords * (shape - 1)      # denormalize
@@ -959,30 +966,93 @@ class ClassificationLogic:
         return self.LABEL_TO_IDX.get(self.LABEL_MAP.get(int(vals[counts.argmax()]), ""), -1)
     
 
-    def loadVolume(self, path):
-        import nibabel as nib
-        path = Path(path)
+    def buildClassifiedSegmentation(self, binary_mask, coords, preds, voxel_spacing, ijkToRas, idx_to_label):
+        """
+        Voronoi-assign every foreground voxel to the nearest skeleton node,
+        then create one Segment per artery class.
+        """
+        import numpy as np
+        from scipy.ndimage import distance_transform_edt
+        from scipy.spatial import cKDTree
 
-        if path.suffix in [".nii", ".gz"] or str(path).endswith(".nii.gz"):
-            nii = nib.load(str(path))
-            data = nii.get_fdata().astype(np.uint8)
-            affine = nii.affine
-            zooms = nii.header.get_zooms()
+        # ── 1. Voronoi assignment ─────────────────────────────────────────────────
+        # coords are ZYX (skan order), binary_mask is ZYX
+        shape = binary_mask.shape  # (Z, Y, X)
 
-        elif path.suffix == ".nrrd":
-            import nrrd
-            data, header = nrrd.read(str(path))
-            data = data.astype(np.uint8)
-            if "space directions" in header:
-                zooms = [np.linalg.norm(v) for v in header["space directions"]]
-            else:
-                zooms = [1.0, 1.0, 1.0]
-            affine = np.eye(4)
-            affine[:3, :3] = np.diag(zooms)
+        # Build KD-tree over skeleton node coords (ZYX)
+        tree = cKDTree(coords)  # coords shape (N, 3), ZYX
 
-        else:
-            raise ValueError(f"Unsupported file format: {path.suffix}")
+        # Get all foreground voxel indices
+        fg_zyx = np.argwhere(binary_mask > 0)  # (M, 3), ZYX
 
-        return data, affine, zooms
+        # Query nearest skeleton node for every foreground voxel
+        _, nearest_node = tree.query(fg_zyx, workers=-1)
+        fg_labels = preds[nearest_node]  # (M,) — class index per voxel
+
+        # Build a full label volume (ZYX), background = -1
+        label_vol = np.full(shape, -1, dtype=np.int32)
+        label_vol[fg_zyx[:, 0], fg_zyx[:, 1], fg_zyx[:, 2]] = fg_labels
+
+        # ── 2. Create Segmentation node ───────────────────────────────────────────
+        segNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLSegmentationNode", "ArterialSegmentation"
+        )
+        segNode.CreateDefaultDisplayNodes()
+
+        # Reference geometry — reuse the labelmap node you already have
+        # (pass it in, or re-derive from ijkToRas + shape)
+        # We'll set it via a temporary labelmap below.
+
+        COLORS = [
+            (255,  0,182), (  0,159,255), (154, 77, 66), (  0,255,190),
+            (120, 63,193), ( 31,150,152), (255,172,253), (177,204,113),
+            (241,  8, 92), (254,143, 66), (221,  0,255), ( 77, 62,  2),
+            (255,  0,  0), (  0,255,  0), (  2,173, 36), (  0,  0,255),
+            (255,255,  0), (  0,255,255), (255,  0,255), (255,239,213),
+            (  0,  0,205), (205,133, 63), (210,180,140), (102,205,170),
+            (  0,  0,128), (  0,139,139), ( 46,139, 87), (255,228,225),
+            (106, 90,205), (221,160,221), (233,150,122), (165, 42, 42),
+            (255,250,250), (147,112,219), (218,112,214), ( 75,  0,130),
+            (255,182,193), ( 60,179,113), (255,235,205), (255,228,196),
+        ]
+
+        # ── 3. One segment per predicted class ────────────────────────────────────
+        unique_classes = np.unique(fg_labels)
+        unique_classes = unique_classes[unique_classes >= 0]
+
+        for cls_idx in unique_classes:
+            name  = idx_to_label.get(int(cls_idx), f"cls_{cls_idx}")
+            color = tuple(c / 255.0 for c in COLORS[int(cls_idx) % len(COLORS)])
+
+            # Binary mask for this class (ZYX)
+            cls_mask = (label_vol == cls_idx).astype(np.uint8)
+
+            # Wrap in a temporary labelmap node
+            tmpLM = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
+            slicer.util.updateVolumeFromArray(tmpLM, cls_mask)
+
+            # Copy IJK→RAS geometry from the original labelmap
+            ijkMat = vtk.vtkMatrix4x4()
+            for r in range(4):
+                for c in range(4):
+                    ijkMat.SetElement(r, c, ijkToRas.GetElement(r, c))
+            tmpLM.SetIJKToRASMatrix(ijkMat)
+
+            # Import into segmentation
+            slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(
+                tmpLM, segNode
+            )
+
+            # Rename and recolour the segment that was just added
+            seg = segNode.GetSegmentation()
+            segID = seg.GetNthSegmentID(seg.GetNumberOfSegments() - 1)
+            segment = seg.GetSegment(segID)
+            segment.SetName(name)
+            segment.SetColor(*color)
+
+            slicer.mrmlScene.RemoveNode(tmpLM)
+
+        segNode.GetDisplayNode().SetVisibility(True)
+        return segNode
 
 

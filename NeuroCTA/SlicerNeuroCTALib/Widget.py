@@ -14,7 +14,7 @@ from .Parameter import Parameter
 from .Logic import Logic, LogicProtocol, SkeletonizationLogic, ClassificationLogic
 from .Signal import Signal
 from .VesselTableManager import VesselTableManager
-from .VesselGNN import VesselGNN, VesselSAGE
+from .VesselGINE import VesselGINE, VesselSAGE
 
 import time
 
@@ -238,7 +238,7 @@ class Widget(qt.QWidget):
         self.runSkelPushButton = qt.QPushButton("▶︎ Run Skeletonization")
         skeletonizationFormLayout.addRow("", self.runSkelPushButton)
 
-        self.showBranchingPointsCheckBox = qt.QCheckBox("Show branching points")
+        self.showBranchingPointsCheckBox = qt.QCheckBox("Show branch/end points")
         self.showBranchingPointsCheckBox.setChecked(True)
         self.showBranchingPointsCheckBox.setEnabled(False)
         skeletonizationFormLayout.addRow("", self.showBranchingPointsCheckBox)
@@ -469,7 +469,7 @@ class Widget(qt.QWidget):
                     dropout=0.3
                 )
             else:
-                model = VesselGNN(
+                model = VesselGINE(
                     in_channels=5,
                     edge_dim=6,
                     hidden_channels=128,
@@ -499,7 +499,7 @@ class Widget(qt.QWidget):
                     dropout=0.3
                 )
             else:
-                model = VesselGNN(
+                model = VesselGINE(
                     in_channels=5,
                     edge_dim=6,
                     hidden_channels=128,
@@ -510,38 +510,67 @@ class Widget(qt.QWidget):
 
             self.classLogic.loadModel(path, model)
         
-        # load directly from file — bypasses Slicer's export geometry issues
-        segFilePath = self.segFilePathEdit.currentPath
-        if not segFilePath:
-            slicer.util.errorDisplay("Please set segmentation file path.")
-            return
 
-        try:
-            seg_vol, affine, zooms = self.classLogic.loadVolume(segFilePath)
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to load file: {e}")
-            return
+        name = f"{inputNode.GetName()}"
+        labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", name)
+        slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
+            inputNode,
+            labelmapNode,
+            slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY
+        )
 
-        binary_mask  = (seg_vol > 0).astype(np.uint8)
+        seg_vol = slicer.util.arrayFromVolume(labelmapNode)
+        referenceNode = labelmapNode
+        self._ijkToRas = vtk.vtkMatrix4x4()
+        referenceNode.GetIJKToRASMatrix(self._ijkToRas)
 
+        # extract spacing here, before creating the logic
+        voxelSpacing = [
+            np.linalg.norm([self._ijkToRas.GetElement(r, 0) for r in range(3)]),
+            np.linalg.norm([self._ijkToRas.GetElement(r, 1) for r in range(3)]),
+            np.linalg.norm([self._ijkToRas.GetElement(r, 2) for r in range(3)]),
+        ]
+
+        binary_mask = (seg_vol > 0).astype(np.uint8)
 
         modelType = "SAGE" if self.sageRadio.isChecked() else "GINE"
 
         # if modelType == "SAGE":
         #     voxelSpacing = [float(zooms[2]), float(zooms[1]), float(zooms[0])]
         # else:
-        voxelSpacing = [float(zooms[0]), float(zooms[1]), float(zooms[2])]
 
-        print("Shape:", binary_mask.shape)
-        print("Zooms:", zooms)
-        print("Spacing passed to inference:", voxelSpacing)
-        print("Affine:\n", affine)
-
-        ras_coords, preds = self.classLogic.runClassInference(
-            binary_mask, None, voxelSpacing, affine,
+        coords, preds = self.classLogic.runClassInference(
+            binary_mask, None, voxelSpacing,
             modelType
         )
+
+        ijkToRas = np.array([
+            [self._ijkToRas.GetElement(r, c) for c in range(4)]
+            for r in range(4)
+        ])
+
+        coords_h = np.c_[
+            coords[:, 2],
+            coords[:, 1],
+            coords[:, 0],
+            np.ones(len(coords))
+        ]
+
+        ras_coords = (ijkToRas @ coords_h.T).T[:, :3]
+
         self._displayClassificationResults(ras_coords, preds)
+
+        # Generate new segmentation from the classification
+        idx_to_label = {v: k for k, v in self.classLogic.LABEL_TO_IDX.items()}
+
+        self.classLogic.buildClassifiedSegmentation(
+            binary_mask,
+            coords,  
+            preds,   
+            voxelSpacing,
+            self._ijkToRas,
+            idx_to_label
+        )
 
     def _displayClassificationResults(self, ras_coords, preds):
         idx_to_label = {v: k for k, v in self.classLogic.LABEL_TO_IDX.items()}
@@ -568,10 +597,10 @@ class Widget(qt.QWidget):
         for idx in np.unique(preds):
             if idx < 0:
                 continue
-            mask      = preds == idx
-            name      = idx_to_label.get(idx, f"cls_{idx}")
+            mask = preds == idx
+            name = idx_to_label.get(idx, f"cls_{idx}")
             class_pts = ras_coords[mask]
-            color     = colors.get(idx, (1.0, 1.0, 1.0))
+            color = colors.get(idx, (1.0, 1.0, 1.0))
 
             pts   = vtk.vtkPoints()
             cells = vtk.vtkCellArray()
